@@ -122,7 +122,32 @@ export default class TopoFeaturePlugin {
     // not some further-out ancestor), additively rather than via cssText, so el's host-set height
     // survives.
     el.style.position = 'relative';
-    this._mount(el).catch(e => console.error('TopoFeaturePlugin: init failed', e));
+    this._mount(el).catch(e => {
+      console.error('TopoFeaturePlugin: init failed', e);
+      if (this._el === el) this._showError(el, `Failed to render this topology view (${e.message}).`);
+    });
+  }
+
+  // Tears down whatever got built so far (via destroy(), which is safe to call on a
+  // partially-initialized instance — every field it touches is null-guarded) and replaces el's
+  // content with a plain-DOM error message. Used both for _mount() failures (caught above) and
+  // for errors thrown from inside the animate() render loop below, which is the harder case: it
+  // runs on its own requestAnimationFrame stack, outside any promise chain the host or this
+  // plugin's own render() could catch, so this plugin must catch and surface it itself.
+  _showError(el, message) {
+    this.destroy(el);
+    const banner = document.createElement('div');
+    banner.style.cssText = 'display: flex; flex-direction: column; align-items: center; justify-content: center; '
+      + 'height: 100%; padding: 16px; text-align: center; color: #b00020; font: 14px/1.4 sans-serif;';
+
+    const messageEl = document.createElement('div');
+    messageEl.textContent = message;
+    const hintEl = document.createElement('div');
+    hintEl.style.cssText = 'margin-top: 12px;';
+    hintEl.textContent = 'See the browser console for details.';
+
+    banner.append(messageEl, hintEl);
+    el.appendChild(banner);
   }
 
   async _mount(el) {
@@ -201,8 +226,13 @@ export default class TopoFeaturePlugin {
     const animate = () => {
       if (!this._animating) return;
       this._animFrameId = requestAnimationFrame(animate);
-      controls.update();
-      renderer.render(scene, camera);
+      try {
+        controls.update();
+        renderer.render(scene, camera);
+      } catch (e) {
+        console.error('TopoFeaturePlugin: render loop failed', e);
+        this._showError(el, `An error occurred while rendering this topology view (${e.message}).`);
+      }
     };
     animate();
   }
