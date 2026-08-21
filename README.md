@@ -30,7 +30,7 @@ dependency) and imported as `import('@ogc/bblocks-viewer-plugin-types')` in JSDo
 
 | Export | Matches | Notes |
 |---|---|---|
-| `TopoFeaturePlugin` | `application/geo+json`, `application/json`, `application/ld+json` whose content is a topo-feature topology document (`points`/`edges`/`rings`/`faces`/`shells`/`solids`) | Three.js scene with orbit controls, grid/wireframe/edges/vertices toggles and a reset-camera button, rendered as plain DOM (no Vuetify/mdi — those are host-only). |
+| `TopoFeaturePlugin` | `application/geo+json`, `application/json`, `application/ld+json` whose content is a topo-feature topology document (`points`/`edges`/`rings`/`faces`/`shells`/`solids`) **and** whose `points` carry a 3D coordinate | Three.js scene with orbit controls, grid/wireframe/edges/vertices toggles and a reset-camera button, rendered as plain DOM (no Vuetify/mdi — those are host-only). Renders whichever geometry is richest — bare points, bare edges, a standalone Face/Ring, or a full Solid — not solids only; a 2D-only topo-feature document is left to the default GeoJSON/map view. |
 
 ## Build
 

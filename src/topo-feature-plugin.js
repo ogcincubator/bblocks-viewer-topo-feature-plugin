@@ -1,5 +1,5 @@
 import { mimeTypeMatches } from './utils/mime-type-match.js';
-import { isTopoFeatureMultiCollection } from './utils/detect-topo.js';
+import { isTopoFeature3D } from './utils/detect-topo.js';
 
 const SUPPORTED_TYPES = ['application/geo+json', 'application/json', 'application/ld+json'];
 
@@ -55,11 +55,14 @@ const ICONS = {
 
 // Renders topo-feature (https://github.com/ogcincubator/topo-feature) topology documents — a
 // CityJSON-like structure of points/edges/rings/faces/shells/solids feature collections
-// cross-referenced by id — as a Three.js scene. Split out of bblocks-viewer-base-plugins'
-// ThreeDPlugin (which still handles plain 3D GeoJSON) so this format, actively evolving, can
-// iterate on its own release cycle. One instance per matched example/transform-output (see host
-// `matchPlugins()`), so all of this state is naturally scoped per-candidate-set rather than
-// needing to be re-derived on render.
+// cross-referenced by id — as a Three.js scene, whenever those points carry a 3D coordinate (see
+// isTopoFeature3D). Renders whatever the richest geometry present actually is — bare points, bare
+// edges, a standalone Face/Ring ("simple polygon"), or a full Solid — not solids exclusively; a
+// 2D-only topo-feature document (e.g. a plain cadastral parcel) is left to the default GeoJSON/map
+// view instead. Split out of bblocks-viewer-base-plugins' ThreeDPlugin (which still handles plain
+// 3D GeoJSON) so this format, actively evolving, can iterate on its own release cycle. One instance
+// per matched example/transform-output (see host `matchPlugins()`), so all of this state is
+// naturally scoped per-candidate-set rather than needing to be re-derived on render.
 //
 // @implements {import('@ogc/bblocks-viewer-plugin-types').ViewPluginClass}
 export default class TopoFeaturePlugin {
@@ -105,7 +108,7 @@ export default class TopoFeaturePlugin {
       if (!c.type || !c.content) return false;
       if (!SUPPORTED_TYPES.some(t => mimeTypeMatches(t, c.type))) return false;
       try {
-        return isTopoFeatureMultiCollection(JSON.parse(c.content));
+        return isTopoFeature3D(JSON.parse(c.content));
       } catch {
         return false;
       }
@@ -237,31 +240,80 @@ export default class TopoFeaturePlugin {
     animate();
   }
 
+  // Renders whatever the richest geometry present in the data is — a full Solid (shell → face →
+  // ring → edge → point), a standalone Face or Ring (a filled polygon with no owning Solid), bare
+  // Edges (line segments with no owning Ring), or bare Points (markers with no owning Edge). Only
+  // one tier renders: e.g. a document with both Solids and loose extra Edges draws just the
+  // Solids, matching how these examples are actually authored (self-contained around one level).
   async _buildScene(scene, THREE, data) {
     const {
-      buildMaps, buildSolidGeometry, buildSolidEdgeLines,
+      buildMaps, buildSolidGeometry, buildSolidEdgeLines, buildFaceGeometry, buildFaceOutline,
+      buildRingGeometry, buildRingOutline, buildAllEdgeLines, buildPointMarkers,
       createSolidMesh, createVertexMarkers, getFeatures, needsTransparency,
     } = await import('./utils/topo-geometry.js');
 
     const maps = buildMaps(data);
     const solids = getFeatures(data.solids || []);
-    const opacity = needsTransparency(data) ? 0.85 : 1.0;
+    const faces = getFeatures(data.faces || []);
+    const rings = getFeatures(data.rings || []);
+    const hasEdges = Object.keys(maps.edgeMap).length > 0;
+    const hasPoints = Object.keys(maps.pointMap).length > 0;
 
-    solids.forEach((solid, i) => {
-      const { geometry } = buildSolidGeometry(solid, maps.shellMap, maps.faceMap, maps.ringMap, maps.edgeMap, maps.pointMap, THREE);
-      const mesh = createSolidMesh(solid, i, geometry, opacity, THREE);
-      const edges = buildSolidEdgeLines(solid, maps.shellMap, maps.faceMap, maps.ringMap, maps.edgeMap, maps.pointMap, THREE);
+    const addMesh = (feature, index, geometry, outline, opacity) => {
+      const mesh = createSolidMesh(feature, index, geometry, opacity, THREE);
       const vertices = createVertexMarkers(geometry, THREE);
-
       mesh.material.wireframe = this._wireframe;
+      outline.visible = this._showEdges;
+      vertices.visible = this._showVertices;
+      scene.add(mesh, outline, vertices);
+      this._solidMeshes.push(mesh);
+      this._solidEdges.push(outline);
+      this._solidVertices.push(vertices);
+    };
+
+    if (solids.length) {
+      const opacity = needsTransparency(data) ? 0.85 : 1.0;
+      solids.forEach((solid, i) => {
+        const { geometry } = buildSolidGeometry(solid, maps.shellMap, maps.faceMap, maps.ringMap, maps.edgeMap, maps.pointMap, THREE);
+        const outline = buildSolidEdgeLines(solid, maps.shellMap, maps.faceMap, maps.ringMap, maps.edgeMap, maps.pointMap, THREE);
+        addMesh(solid, i, geometry, outline, opacity);
+      });
+    } else if (faces.length) {
+      // Simple-polygon case: one or more Faces with no owning Shell/Solid.
+      const opacity = needsTransparency(data) ? 0.85 : 1.0;
+      faces.forEach((face, i) => {
+        const geometry = buildFaceGeometry(face, maps.ringMap, maps.edgeMap, maps.pointMap, THREE);
+        if (!geometry) return;
+        const outline = buildFaceOutline(face, maps.ringMap, maps.edgeMap, maps.pointMap, THREE);
+        addMesh(face, i, geometry, outline, opacity);
+      });
+    } else if (rings.length) {
+      // Flattest simple-polygon case: bare Rings with no owning Face at all.
+      rings.forEach((ring, i) => {
+        const geometry = buildRingGeometry(ring, maps.edgeMap, maps.pointMap, THREE);
+        if (!geometry) return;
+        const outline = buildRingOutline(ring, maps.edgeMap, maps.pointMap, THREE);
+        addMesh(ring, i, geometry, outline, 1.0);
+      });
+    } else if (hasEdges) {
+      // Bare edges: no fill, so the edges toggle (on by default) already shows something; vertices
+      // still default off, so turn them on too or points-with-no-edges-drawn-through-them vanish.
+      this._showVertices = true;
+      const edges = buildAllEdgeLines(maps.edgeMap, maps.pointMap, THREE);
+      const vertices = buildPointMarkers(maps.pointMap, THREE);
       edges.visible = this._showEdges;
       vertices.visible = this._showVertices;
-
-      scene.add(mesh, edges, vertices);
-      this._solidMeshes.push(mesh);
+      scene.add(edges, vertices);
       this._solidEdges.push(edges);
       this._solidVertices.push(vertices);
-    });
+    } else if (hasPoints) {
+      // Bare points: nothing else to draw, so points must default to visible.
+      this._showVertices = true;
+      const vertices = buildPointMarkers(maps.pointMap, THREE);
+      vertices.visible = true;
+      scene.add(vertices);
+      this._solidVertices.push(vertices);
+    }
   }
 
   _fitCamera(THREE) {
