@@ -10,6 +10,10 @@ const NORMAL_X_AXIS_THRESHOLD = 0.9;
 const POSITION_ATTRIBUTE = 'position';
 const NORMAL_ATTRIBUTE = 'normal';
 const REVERSED_ORIENTATION = '-';
+const FACE_TOPOLOGY_TYPE = 'Face';
+const SHELL_TOPOLOGY_TYPE = 'Shell';
+const SUBTENDED_ANGLE_FEATURE_TYPE = 'SubtendedAngle';
+const MAX_SHELL_NESTING_DEPTH = 16;
 
 const EDGE_LINE_COLOR = 0xffffff;
 const VERTEX_MARKER_SEGMENTS = 12;
@@ -25,12 +29,20 @@ export const SOLID_COLORS = [
   0x33ffff, 0xffff33, 0xff33ff, 0x88ff33, 0x3388aa,
 ];
 
-// A points/edges/rings/faces/shells/solids array entry is either a nested FeatureCollection
-// wrapper (`{ features: [...] }`, e.g. topo-feature-multi-collection's examples) or a bare
-// Feature itself (e.g. topo-solid's self-contained examples). Kept in sync with the identical
-// helper in detect-topo.js (duplicated rather than shared — see that file's comment).
+// A points/edges/rings/faces/shells/solids/parcels array entry is either a nested
+// FeatureCollection wrapper (`{ features: [...] }`, e.g. topo-feature-multi-collection's
+// examples) or a bare Feature itself (e.g. topo-solid's self-contained examples). Kept in sync
+// with the identical helper in detect-topo.js (duplicated rather than shared — see that file's
+// comment).
 function collectionFeatures(item) {
   return Array.isArray(item?.features) ? item.features : [item];
+}
+
+// Vector observation / subtended-angle edge collections describe survey angles, not topology —
+// they share the edges array but aren't real segments between two resolvable points, so they're
+// excluded from the edge map and from edge counts.
+function edgeFeatureCollections(edgeCollections = []) {
+  return edgeCollections.filter(fc => fc?.featureType !== SUBTENDED_ANGLE_FEATURE_TYPE);
 }
 
 export function buildMaps(data) {
@@ -40,7 +52,7 @@ export function buildMaps(data) {
   centerCoordinatesAroundOrigin(Object.values(pointMap));
   return {
     pointMap,
-    edgeMap: mapFeaturesById(data.edges, ef => ef.topology.references),
+    edgeMap: mapFeaturesById(edgeFeatureCollections(data.edges), ef => ef.topology.references),
     ringMap:  mapFeaturesById(data.rings),
     faceMap:  mapFeaturesById(data.faces),
     shellMap: mapFeaturesById(data.shells),
@@ -53,10 +65,13 @@ function mapFeaturesById(featureCollections = [], getValue = f => f) {
   return map;
 }
 
+// Moves the X/Y centroid of the model to the origin. Z is left untouched so absolute heights stay
+// aligned to datum — the world-origin grid (drawn once, at z=0, independent of any model) would
+// otherwise appear to float at the wrong elevation relative to a model whose mean height isn't 0.
 function centerCoordinatesAroundOrigin(coords) {
   if (!coords.length) return;
   const centroid = calculateCentroid(coords);
-  coords.forEach(c => c.forEach((v, i) => { c[i] = v - centroid[i]; }));
+  coords.forEach(c => { c[0] -= centroid[0]; c[1] -= centroid[1]; });
 }
 
 function calculateCentroid(coords) {
@@ -75,7 +90,7 @@ export function getTopologyFeatureCounts(data) {
   const countFeatures = (fcs = []) => fcs.reduce((n, fc) => n + collectionFeatures(fc).length, 0);
   return {
     points: countFeatures(data.points),
-    edges:  countFeatures(data.edges),
+    edges:  countFeatures(edgeFeatureCollections(data.edges)),
     faces:  countFeatures(data.faces),
     shells: countFeatures(data.shells),
   };
@@ -97,8 +112,8 @@ function ringToCoords(ringFeature, edgeMap, pointMap) {
 }
 
 // Newell's method: a robust normal for a (possibly non-convex, near-planar) polygon, used when a
-// ring has no owning Face to supply an authoritative `properties.normal` — i.e. a bare/standalone
-// ring rendered on its own rather than as part of a Face.
+// ring/polygon has no owning Face to supply an authoritative `properties.normal` — i.e. a
+// bare/standalone ring or a Polygon-topology parcel rendered on its own.
 function newellNormal(coords) {
   const n = [0, 0, 0];
   for (let i = 0; i < coords.length; i++) {
@@ -151,13 +166,78 @@ function triangulatePolygon(outerCoords, holeCoordsList, normal, THREE) {
   return { positions, normals };
 }
 
-function collectUniqueSolidEdgeIds(solid, shellMap, faceMap, ringMap) {
+// ─── Topology traversal (shells referencing shells) ───────────────────────────
+
+// Faces and shells share one ID space, so a directed_reference carries no hint of its target's
+// kind. Faces are looked up first, and `topology.type` guards the case where the same ID
+// happens to appear in both maps.
+function resolveBoundaryReference(ref, faceMap, shellMap) {
+  const face = faceMap[ref];
+  if (face && face.topology?.type !== SHELL_TOPOLOGY_TYPE) return { kind: FACE_TOPOLOGY_TYPE, feature: face };
+  const shell = shellMap[ref];
+  if (shell) return { kind: SHELL_TOPOLOGY_TYPE, feature: shell };
+  return null;
+}
+
+// Flattens a solid or shell boundary into leaf face references, descending through any nested
+// shells. Supports both the plain solid → shell → face chain and an offset-derived solid whose
+// shell references other shells (e.g. upper/lower offset surfaces) alongside its own faces — a
+// shell whose references are all faces flattens to those faces at depth 0, so existing datasets
+// resolve exactly as before.
+//
+// Each leaf face reference keeps its own orientation untouched. A *shell* reference's orientation
+// is deliberately not propagated down to the faces it contains: it marks the shell's role in its
+// parent (a solid's interior void shell is referenced with '-') rather than requesting a normal
+// flip, and the contained faces already carry correctly signed normals.
+function flattenToFaceReferences(container, faceMap, shellMap, visitedShellIds = new Set(), depth = 0) {
+  if (depth > MAX_SHELL_NESTING_DEPTH) return [];
+  const refs = container?.topology?.directed_references || [];
+  return refs.flatMap(ref => {
+    const resolved = resolveBoundaryReference(ref.ref, faceMap, shellMap);
+    if (!resolved) return [];
+    if (resolved.kind === FACE_TOPOLOGY_TYPE) return [ref];
+    // The cycle guard is per-path, so a shell legitimately referenced from two separate branches
+    // is still expanded in both.
+    if (visitedShellIds.has(ref.ref)) return [];
+    return flattenToFaceReferences(resolved.feature, faceMap, shellMap, new Set(visitedShellIds).add(ref.ref), depth + 1);
+  });
+}
+
+// Collects the IDs of every shell that bounds a solid, descending through nested shells so a
+// shell referenced only indirectly is included too.
+function collectSolidShellIds(solids, faceMap, shellMap) {
+  const solidShellIds = new Set();
+  const visit = (container, depth) => {
+    if (depth > MAX_SHELL_NESTING_DEPTH) return;
+    const refs = container?.topology?.directed_references || [];
+    refs.forEach(ref => {
+      const resolved = resolveBoundaryReference(ref.ref, faceMap, shellMap);
+      if (!resolved || resolved.kind !== SHELL_TOPOLOGY_TYPE) return;
+      // Membership doubles as the cycle guard: a shell already recorded has already had its own
+      // references expanded.
+      if (solidShellIds.has(ref.ref)) return;
+      solidShellIds.add(ref.ref);
+      visit(resolved.feature, depth + 1);
+    });
+  };
+  solids.forEach(solid => visit(solid, 0));
+  return solidShellIds;
+}
+
+// Returns the open shells in a dataset: those no solid uses as part of its boundary, directly or
+// through a nested shell. A solid already draws the faces of its own shells, so rendering those
+// shells again would duplicate geometry — only open shells describe a surface not otherwise
+// visible.
+export function getOpenShells(data, maps) {
+  const solidShellIds = collectSolidShellIds(getFeatures(data.solids || []), maps.faceMap, maps.shellMap);
+  return getFeatures(data.shells || []).filter(shell => !solidShellIds.has(shell.id));
+}
+
+function collectUniqueEdgeIds(container, faceMap, shellMap, ringMap) {
   const edgeIds = new Set();
-  solid.topology.directed_references.forEach(shellRef => {
-    shellMap[shellRef.ref]?.topology.directed_references.forEach(faceRef => {
-      faceMap[faceRef.ref]?.topology.directed_references.forEach(ringRef => {
-        ringMap[ringRef.ref]?.topology.directed_references.forEach(edgeRef => edgeIds.add(edgeRef.ref));
-      });
+  flattenToFaceReferences(container, faceMap, shellMap).forEach(faceRef => {
+    faceMap[faceRef.ref]?.topology.directed_references.forEach(ringRef => {
+      ringMap[ringRef.ref]?.topology.directed_references.forEach(edgeRef => edgeIds.add(edgeRef.ref));
     });
   });
   return edgeIds;
@@ -175,14 +255,24 @@ function loopToSegmentPositions(coords) {
   return positions;
 }
 
-export function buildSolidEdgeLines(solid, shellMap, faceMap, ringMap, edgeMap, pointMap, THREE) {
+function buildContainerEdgeLines(container, shellMap, faceMap, ringMap, edgeMap, pointMap, THREE) {
   const positions = [];
-  collectUniqueSolidEdgeIds(solid, shellMap, faceMap, ringMap).forEach(id => {
+  collectUniqueEdgeIds(container, faceMap, shellMap, ringMap).forEach(id => {
     const pts = edgeMap[id];
     if (pts && pointMap[pts[0]] && pointMap[pts[1]])
       positions.push(...pointMap[pts[0]], ...pointMap[pts[1]]);
   });
   return lineSegmentsFromPositions(positions, THREE);
+}
+
+export function buildSolidEdgeLines(solid, shellMap, faceMap, ringMap, edgeMap, pointMap, THREE) {
+  return buildContainerEdgeLines(solid, shellMap, faceMap, ringMap, edgeMap, pointMap, THREE);
+}
+
+// Edge outline of a standalone (open) Shell — the same walk as buildSolidEdgeLines, starting from
+// a shell instead of a solid.
+export function buildShellEdgeLines(shell, shellMap, faceMap, ringMap, edgeMap, pointMap, THREE) {
+  return buildContainerEdgeLines(shell, shellMap, faceMap, ringMap, edgeMap, pointMap, THREE);
 }
 
 // Outline of a single standalone Face (all its rings — outer boundary plus any holes).
@@ -201,9 +291,9 @@ export function buildRingOutline(ring, edgeMap, pointMap, THREE) {
 
 // Triangulates a single Face (its outer ring, minus any hole rings after the first
 // directed_reference) into positions/normals, oriented per `orientation` ('+'/'-') relative to
-// the Face's own `properties.normal`. Shared by solid rendering (a Face reached via a Shell) and
-// standalone Face rendering (a Face with no owning Solid at all) — a Face's geometry doesn't
-// depend on whether a Solid happens to reference it.
+// the Face's own `properties.normal`. Shared by solid/shell rendering (a Face reached via a
+// Shell) and standalone Face rendering (a Face with no owning Solid/Shell at all) — a Face's
+// geometry doesn't depend on whether a Solid happens to reference it.
 function faceToTriangles(face, ringMap, edgeMap, pointMap, orientation, THREE) {
   const ringRefs = face.topology.directed_references;
   const outerRing = ringMap[ringRefs[0]?.ref];
@@ -231,24 +321,35 @@ function trianglesToGeometry(vertexPositions, vertexNormals, THREE) {
   return geometry;
 }
 
-export function buildSolidGeometry(solid, shellMap, faceMap, ringMap, edgeMap, pointMap, THREE) {
+function buildGeometryFromFaceReferences(faceReferences, ringMap, edgeMap, pointMap, faceMap, THREE) {
   const vertexPositions = [];
   const vertexNormals = [];
   let faceCount = 0;
-  for (const shellRef of solid.topology.directed_references) {
-    const shell = shellMap[shellRef.ref];
-    if (!shell) continue;
-    for (const faceRef of shell.topology.directed_references) {
-      const face = faceMap[faceRef.ref];
-      if (!face) continue;
-      const tri = faceToTriangles(face, ringMap, edgeMap, pointMap, faceRef.orientation, THREE);
-      if (!tri) continue;
-      vertexPositions.push(...tri.positions);
-      vertexNormals.push(...tri.normals);
-      faceCount++;
-    }
+  for (const faceRef of faceReferences) {
+    const face = faceMap[faceRef.ref];
+    if (!face) continue;
+    const tri = faceToTriangles(face, ringMap, edgeMap, pointMap, faceRef.orientation, THREE);
+    if (!tri) continue;
+    vertexPositions.push(...tri.positions);
+    vertexNormals.push(...tri.normals);
+    faceCount++;
   }
   return { geometry: trianglesToGeometry(vertexPositions, vertexNormals, THREE), faceCount };
+}
+
+export function buildSolidGeometry(solid, shellMap, faceMap, ringMap, edgeMap, pointMap, THREE) {
+  return buildGeometryFromFaceReferences(
+    flattenToFaceReferences(solid, faceMap, shellMap), ringMap, edgeMap, pointMap, faceMap, THREE
+  );
+}
+
+// Builds a standalone (open) Shell's geometry — the same face-flattening walk as
+// buildSolidGeometry, starting from a shell instead of a solid, so a shell that itself
+// references other shells (e.g. an offset-derived surface) resolves its nested faces too.
+export function buildShellGeometry(shell, shellMap, faceMap, ringMap, edgeMap, pointMap, THREE) {
+  return buildGeometryFromFaceReferences(
+    flattenToFaceReferences(shell, faceMap, shellMap), ringMap, edgeMap, pointMap, faceMap, THREE
+  );
 }
 
 // Renders a single Face on its own, independent of any owning Shell/Solid — the "simple polygon"
@@ -268,8 +369,95 @@ export function buildRingGeometry(ring, edgeMap, pointMap, THREE) {
   return trianglesToGeometry(tri.positions, tri.normals, THREE);
 }
 
-// Used for any filled mesh (a Solid, or a standalone Face/Ring rendered on its own) — only the
-// index (for color cycling) and an optional name/id for userData are solid-specific in name only.
+// ─── Polygon-topology parcels ──────────────────────────────────────────────────
+//
+// A cadastral "Polygon" parcel (e.g. AggregatePolygon's leaf lots) carries its boundary as
+// `topology.references`: a bare, *unordered* bag of edge ids with no orientation — unlike
+// Ring/Face's `directed_references`. resolvePolygonCoords walks the edges as an adjacency graph
+// to recover an ordered ring. Other parcel topology types (Solid, AggregatePolygon,
+// AggregateSolid — which reference other parcels or shells rather than edges) have no
+// `topology.references` of this shape, so they safely resolve to an empty ring here and are left
+// to the existing solid-rendering tier instead of being force-fit through this path.
+
+function resolvePolygonCoords(edgeRefs, edgeMap, pointMap) {
+  const adjacency = new Map();
+  let startPointId = null;
+  const addNeighbor = (pointId, neighborId) => {
+    if (!adjacency.has(pointId)) adjacency.set(pointId, new Set());
+    adjacency.get(pointId).add(neighborId);
+  };
+
+  edgeRefs.forEach(edgeRef => {
+    const pts = edgeMap[edgeRef];
+    if (!pts) return;
+    const [startId, endId] = pts;
+    if (!pointMap[startId] || !pointMap[endId]) return;
+    if (startPointId == null) startPointId = startId;
+    addNeighbor(startId, endId);
+    addNeighbor(endId, startId);
+  });
+  if (startPointId == null) return [];
+
+  const coords = [pointMap[startPointId]];
+  const visited = new Set([startPointId]);
+  let previousId = null;
+  let currentId = startPointId;
+
+  for (let step = 0; step < adjacency.size + 1; step++) {
+    const neighbors = Array.from(adjacency.get(currentId) || []);
+    if (!neighbors.length) break;
+    const nextId = neighbors.find(id => id !== previousId) || neighbors[0];
+    if (nextId === startPointId && coords.length > 2) break;
+    if (visited.has(nextId) && nextId !== startPointId) break;
+    coords.push(pointMap[nextId]);
+    visited.add(nextId);
+    previousId = currentId;
+    currentId = nextId;
+  }
+
+  if (coords.length > 1 && coordsEqual(coords[0], coords[coords.length - 1])) coords.pop();
+  return coords;
+}
+
+function coordsEqual(a, b) {
+  return a.length === b.length && a.every((v, i) => v === b[i]);
+}
+
+// Normalises a Polygon parcel's edge references to ring form: accepts both the flat legacy shape
+// (`["edge-1", "edge-2", ...]`, a single outer boundary) and the GeoJSON Polygon shape
+// (`[["edge-1", ...], ["hole-edge-1", ...]]`, an outer boundary followed by holes). Nesting is
+// detected from the first entry, since the two shapes are otherwise indistinguishable.
+function normalizePolygonRings(references = []) {
+  if (!references.length) return [];
+  return Array.isArray(references[0]) ? references : [references];
+}
+
+export function buildPolygonGeometry(polygon, edgeMap, pointMap, THREE) {
+  const ringCoords = normalizePolygonRings(polygon.topology.references)
+    .map(edgeRefs => resolvePolygonCoords(edgeRefs, edgeMap, pointMap))
+    .filter(coords => coords.length >= 3);
+  if (!ringCoords.length) return null;
+
+  const [outerCoords, ...holeCoordsList] = ringCoords;
+  const tri = triangulatePolygon(outerCoords, holeCoordsList, newellNormal(outerCoords), THREE);
+  if (!tri.positions.length) return null;
+  return trianglesToGeometry(tri.positions, tri.normals, THREE);
+}
+
+export function buildPolygonEdgeLines(polygon, edgeMap, pointMap, THREE) {
+  const edgeIds = new Set(normalizePolygonRings(polygon.topology.references).flat());
+  const positions = [];
+  edgeIds.forEach(id => {
+    const pts = edgeMap[id];
+    if (pts && pointMap[pts[0]] && pointMap[pts[1]])
+      positions.push(...pointMap[pts[0]], ...pointMap[pts[1]]);
+  });
+  return lineSegmentsFromPositions(positions, THREE);
+}
+
+// Used for any filled mesh (a Solid, an open Shell surface, a Polygon parcel, or a standalone
+// Face/Ring rendered on its own) — only the index (for color cycling) and an optional name/id for
+// userData are solid-specific in name only.
 export function createSolidMesh(feature, index, geometry, opacity = 1.0, THREE) {
   const mesh = new THREE.Mesh(geometry, new THREE.MeshPhongMaterial({
     color: SOLID_COLORS[index % SOLID_COLORS.length],
@@ -281,7 +469,10 @@ export function createSolidMesh(feature, index, geometry, opacity = 1.0, THREE) 
     polygonOffsetFactor: POLYGON_OFFSET_FACTOR,
     polygonOffsetUnits: POLYGON_OFFSET_UNITS,
   }));
-  mesh.userData.solidName = feature.properties?.name || feature.id;
+  mesh.userData.solidName = feature.properties?.name
+    || feature.properties?.appellation?.label
+    || feature.properties?.appellation
+    || feature.id;
   return mesh;
 }
 

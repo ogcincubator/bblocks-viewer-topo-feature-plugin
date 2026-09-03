@@ -34,6 +34,36 @@ function resolveThree(context) {
   return loadThree();
 }
 
+const CAMERA_FOV = 60;
+const CAMERA_NEAR = 0.001;
+const CAMERA_FAR = 10000;
+// Guards against a degenerate (zero-area) orthographic frustum when the camera sits on the
+// controls target.
+const MIN_FRUSTUM_HALF_HEIGHT = 1e-6;
+
+const PROJECTION_PERSPECTIVE = 'perspective';
+const PROJECTION_ORTHOGRAPHIC = 'orthographic';
+
+// Per-kind mesh opacity. Solids (and standalone faces/rings) additionally go semi-transparent
+// only when needsTransparency() finds a hole/void that would otherwise hide interior geometry;
+// surfaces and parcels are always uniformly translucent since they're most useful shown alongside
+// (rather than obscuring) whatever else is in the scene.
+const MESH_OPACITY_OPAQUE = 1.0;
+const MESH_OPACITY_TRANSPARENT = 0.85;
+const MESH_OPACITY_SURFACE = 0.55;
+const MESH_OPACITY_PARCEL = 0.35;
+
+// Kinds that get a dedicated inline toggle icon (only when present) and their inline label. Every
+// kind actually rendered (including the legacy face/ring fallback tiers, which have no inline
+// icon) still gets its own section in the fullscreen per-instance panel — see
+// _refreshFullscreenPanel().
+const INLINE_KIND_TOGGLES = [
+  { kind: 'parcel', icon: 'parcels', label: 'parcels' },
+  { kind: 'surface', icon: 'surfaces', label: 'surfaces' },
+  { kind: 'solid', icon: 'solids', label: 'solids' },
+];
+const KIND_PANEL_LABELS = { parcel: 'Parcels', surface: 'Surfaces', solid: 'Solids', face: 'Faces', ring: 'Rings' };
+
 const BUTTON_STYLE = 'width: 26px; height: 26px; border: none; border-radius: 4px; cursor: pointer; '
   + 'display: flex; align-items: center; justify-content: center; padding: 0; '
   + 'box-shadow: 0 1px 3px rgba(0,0,0,0.4);';
@@ -51,18 +81,25 @@ const ICONS = {
   wireframe: '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M12 2 3 7v10l9 5 9-5V7z"/><path d="M3 7l9 5 9-5"/><path d="M12 12v10"/></svg>',
   edges: '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="5" cy="19" r="2" fill="currentColor" stroke="none"/><circle cx="19" cy="5" r="2" fill="currentColor" stroke="none"/><line x1="6.5" y1="17.5" x2="17.5" y2="6.5"/></svg>',
   vertices: '<svg viewBox="0 0 24 24" width="15" height="15" fill="currentColor" stroke="none"><circle cx="5" cy="5" r="1.6"/><circle cx="12" cy="5" r="1.6"/><circle cx="19" cy="5" r="1.6"/><circle cx="5" cy="12" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="19" cy="12" r="1.6"/><circle cx="5" cy="19" r="1.6"/><circle cx="12" cy="19" r="1.6"/><circle cx="19" cy="19" r="1.6"/></svg>',
+  parcels: '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M12 3 20 9l-3 10H7L4 9Z"/></svg>',
+  surfaces: '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M12 3 21 8l-9 5-9-5Z"/></svg>',
+  solids: '<svg viewBox="0 0 24 24" width="15" height="15" fill="currentColor" stroke="none"><path d="M12 2 21 7v10l-9 5-9-5V7z" opacity="0.35"/><path d="M12 2 21 7 12 12 3 7z"/></svg>',
+  projection: '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M7 4h10l4 16H3Z"/></svg>',
+  fullscreen: '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 3H5a2 2 0 0 0-2 2v4"/><path d="M15 3h4a2 2 0 0 1 2 2v4"/><path d="M9 21H5a2 2 0 0 1-2-2v-4"/><path d="M15 21h4a2 2 0 0 0 2-2v-4"/></svg>',
+  fullscreenExit: '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 9V5a2 2 0 0 1 2-2h4"/><path d="M20 9V5a2 2 0 0 0-2-2h-4"/><path d="M4 15v4a2 2 0 0 0 2 2h4"/><path d="M20 15v4a2 2 0 0 1-2 2h-4"/></svg>',
 };
 
 // Renders topo-feature (https://github.com/ogcincubator/topo-feature) topology documents — a
 // CityJSON-like structure of points/edges/rings/faces/shells/solids feature collections
 // cross-referenced by id — as a Three.js scene, whenever those points carry a 3D coordinate (see
-// isTopoFeature3D). Renders whatever the richest geometry present actually is — bare points, bare
-// edges, a standalone Face/Ring ("simple polygon"), or a full Solid — not solids exclusively; a
-// 2D-only topo-feature document (e.g. a plain cadastral parcel) is left to the default GeoJSON/map
-// view instead. Split out of bblocks-viewer-base-plugins' ThreeDPlugin (which still handles plain
-// 3D GeoJSON) so this format, actively evolving, can iterate on its own release cycle. One instance
-// per matched example/transform-output (see host `matchPlugins()`), so all of this state is
-// naturally scoped per-candidate-set rather than needing to be re-derived on render.
+// isTopoFeature3D). Solids, open shells (surfaces not already drawn as part of a solid) and
+// Polygon-topology parcels render together whenever any of the three is present, each its own
+// color-grouped set; only when none of them is present does rendering fall back to the flatter
+// single-tier chain (a standalone Face/Ring, bare edges, or bare points) — see _buildScene. Split
+// out of bblocks-viewer-base-plugins' ThreeDPlugin (which still handles plain 3D GeoJSON) so this
+// format, actively evolving, can iterate on its own release cycle. One instance per matched
+// example/transform-output (see host `matchPlugins()`), so all of this state is naturally scoped
+// per-candidate-set rather than needing to be re-derived on render.
 //
 // @implements {import('@ogc/bblocks-viewer-plugin-types').ViewPluginClass}
 export default class TopoFeaturePlugin {
@@ -81,21 +118,35 @@ export default class TopoFeaturePlugin {
     this._el = null;
     this._THREE = null;
     this._renderer = null;
-    this._camera = null;
+    this._perspectiveCamera = null;
+    this._orthographicCamera = null;
+    this._camera = null; // whichever of the two is currently active — see _setProjection()
+    this._projection = PROJECTION_PERSPECTIVE;
+    this._viewWidth = 0;
+    this._viewHeight = 0;
     this._controls = null;
     this._gridHelper = null;
     this._resizeObserver = null;
+    this._fullscreenChangeHandler = null;
     this._animating = false;
     this._animFrameId = null;
     this._solidMeshes = [];
     this._solidEdges = [];
     this._solidVertices = [];
+    // One record per named renderable object (a solid, an open shell, a parcel, or a standalone
+    // face/ring) — {mesh, edges, vertices, kind, label, visible}. Drives both the inline per-kind
+    // toggle icons and the fullscreen per-type/per-instance panel from one shared visibility
+    // state. Bare edge/point "soup" tiers (no discrete named objects) aren't recorded here.
+    this._renderables = [];
     this._initialCameraPosition = null;
     this._initialCameraTarget = null;
+    this._initialCameraZoom = 1;
     this._wireframe = false;
     this._showGrid = false;
     this._showEdges = true;
     this._showVertices = false;
+    this._fullscreenPanelEl = null;
+    this._kindToggleButtons = [];
   }
 
   matches() {
@@ -171,13 +222,28 @@ export default class TopoFeaturePlugin {
 
     const width = canvasContainer.clientWidth || 600;
     const height = canvasContainer.clientHeight || 400;
+    this._viewWidth = width;
+    this._viewHeight = height;
 
     const scene = new THREE.Scene();
     scene.background = new THREE.Color(0xadb1b1);
 
-    const camera = new THREE.PerspectiveCamera(60, width / height, 0.001, 10000);
-    camera.up.set(0, 0, 1);
-    this._camera = camera;
+    // Both a perspective and an orthographic camera are built up front; only one is ever active
+    // (this._camera) — _setProjection() swaps which instance that is. Every closure below that
+    // needs "the camera" reads this._camera fresh rather than capturing either instance directly,
+    // so a projection swap takes effect without re-wiring the render loop/resize handler.
+    const perspectiveCamera = new THREE.PerspectiveCamera(CAMERA_FOV, width / height, CAMERA_NEAR, CAMERA_FAR);
+    perspectiveCamera.up.set(0, 0, 1);
+    this._perspectiveCamera = perspectiveCamera;
+
+    const orthographicCamera = new THREE.OrthographicCamera(
+      -(width / height), width / height, 1, -1, CAMERA_NEAR, CAMERA_FAR
+    );
+    orthographicCamera.up.set(0, 0, 1);
+    this._orthographicCamera = orthographicCamera;
+
+    this._camera = perspectiveCamera;
+    this._projection = PROJECTION_PERSPECTIVE;
 
     const renderer = new THREE.WebGLRenderer({ antialias: true });
     renderer.setPixelRatio(window.devicePixelRatio);
@@ -185,7 +251,7 @@ export default class TopoFeaturePlugin {
     canvasContainer.appendChild(renderer.domElement);
     this._renderer = renderer;
 
-    const controls = new OrbitControls(camera, renderer.domElement);
+    const controls = new OrbitControls(this._camera, renderer.domElement);
     controls.enableDamping = true;
     controls.dampingFactor = 0.05;
     this._controls = controls;
@@ -219,8 +285,11 @@ export default class TopoFeaturePlugin {
       const w = canvasContainer.clientWidth;
       const h = canvasContainer.clientHeight;
       if (!w || !h) return;
-      camera.aspect = w / h;
-      camera.updateProjectionMatrix();
+      this._viewWidth = w;
+      this._viewHeight = h;
+      this._perspectiveCamera.aspect = w / h;
+      this._perspectiveCamera.updateProjectionMatrix();
+      this._setOrthographicHalfHeight(this._orthographicCamera.top || 1);
       renderer.setSize(w, h);
     });
     this._resizeObserver.observe(canvasContainer);
@@ -231,7 +300,7 @@ export default class TopoFeaturePlugin {
       this._animFrameId = requestAnimationFrame(animate);
       try {
         controls.update();
-        renderer.render(scene, camera);
+        renderer.render(scene, this._camera);
       } catch (e) {
         console.error('TopoFeaturePlugin: render loop failed', e);
         this._showError(el, `An error occurred while rendering this topology view (${e.message}).`);
@@ -240,60 +309,90 @@ export default class TopoFeaturePlugin {
     animate();
   }
 
-  // Renders whatever the richest geometry present in the data is — a full Solid (shell → face →
-  // ring → edge → point), a standalone Face or Ring (a filled polygon with no owning Solid), bare
-  // Edges (line segments with no owning Ring), or bare Points (markers with no owning Edge). Only
-  // one tier renders: e.g. a document with both Solids and loose extra Edges draws just the
-  // Solids, matching how these examples are actually authored (self-contained around one level).
+  // Renders whatever geometry the data actually contains. Solids, open shells (surfaces not
+  // already drawn as part of a solid — see getOpenShells) and Polygon-topology parcels render
+  // together whenever any is present, each its own color-grouped tier. Only when none of the
+  // three is present does rendering fall back to the older single-tier chain — a standalone Face
+  // or Ring ("simple polygon"), bare Edges, or bare Points — matching how leaner topo-feature
+  // examples (not solids/parcels at all) are actually authored.
   async _buildScene(scene, THREE, data) {
     const {
-      buildMaps, buildSolidGeometry, buildSolidEdgeLines, buildFaceGeometry, buildFaceOutline,
-      buildRingGeometry, buildRingOutline, buildAllEdgeLines, buildPointMarkers,
-      createSolidMesh, createVertexMarkers, getFeatures, needsTransparency,
+      buildMaps, buildSolidGeometry, buildSolidEdgeLines, buildShellGeometry, buildShellEdgeLines,
+      buildFaceGeometry, buildFaceOutline, buildRingGeometry, buildRingOutline,
+      buildPolygonGeometry, buildPolygonEdgeLines, buildAllEdgeLines, buildPointMarkers,
+      createSolidMesh, createVertexMarkers, getFeatures, getOpenShells, needsTransparency,
     } = await import('./utils/topo-geometry.js');
 
     const maps = buildMaps(data);
     const solids = getFeatures(data.solids || []);
+    const openShells = getOpenShells(data, maps);
+    const parcels = getFeatures(data.parcels || []);
     const faces = getFeatures(data.faces || []);
     const rings = getFeatures(data.rings || []);
     const hasEdges = Object.keys(maps.edgeMap).length > 0;
     const hasPoints = Object.keys(maps.pointMap).length > 0;
 
-    const addMesh = (feature, index, geometry, outline, opacity) => {
-      const mesh = createSolidMesh(feature, index, geometry, opacity, THREE);
+    let colorIndex = 0;
+    const addMesh = (feature, geometry, outline, opacity, kind) => {
+      const mesh = createSolidMesh(feature, colorIndex++, geometry, opacity, THREE);
       const vertices = createVertexMarkers(geometry, THREE);
       mesh.material.wireframe = this._wireframe;
-      outline.visible = this._showEdges;
-      vertices.visible = this._showVertices;
       scene.add(mesh, outline, vertices);
       this._solidMeshes.push(mesh);
       this._solidEdges.push(outline);
       this._solidVertices.push(vertices);
+      const label = feature.properties?.appellation?.label
+        || feature.properties?.appellation
+        || feature.properties?.description
+        || feature.properties?.name
+        || feature.id;
+      const record = { mesh, edges: outline, vertices, kind, label: String(label), visible: true };
+      this._renderables.push(record);
+      this._applyRenderableVisibility(record);
     };
 
-    if (solids.length) {
-      const opacity = needsTransparency(data) ? 0.85 : 1.0;
-      solids.forEach((solid, i) => {
-        const { geometry } = buildSolidGeometry(solid, maps.shellMap, maps.faceMap, maps.ringMap, maps.edgeMap, maps.pointMap, THREE);
-        const outline = buildSolidEdgeLines(solid, maps.shellMap, maps.faceMap, maps.ringMap, maps.edgeMap, maps.pointMap, THREE);
-        addMesh(solid, i, geometry, outline, opacity);
+    const hasPrimaryTier = solids.length > 0 || openShells.length > 0 || parcels.length > 0;
+
+    if (hasPrimaryTier) {
+      if (solids.length) {
+        const opacity = needsTransparency(data) ? MESH_OPACITY_TRANSPARENT : MESH_OPACITY_OPAQUE;
+        solids.forEach(solid => {
+          const { geometry } = buildSolidGeometry(solid, maps.shellMap, maps.faceMap, maps.ringMap, maps.edgeMap, maps.pointMap, THREE);
+          const outline = buildSolidEdgeLines(solid, maps.shellMap, maps.faceMap, maps.ringMap, maps.edgeMap, maps.pointMap, THREE);
+          addMesh(solid, geometry, outline, opacity, 'solid');
+        });
+      }
+      openShells.forEach(shell => {
+        const { geometry, faceCount } = buildShellGeometry(shell, maps.shellMap, maps.faceMap, maps.ringMap, maps.edgeMap, maps.pointMap, THREE);
+        if (!faceCount) return;
+        const outline = buildShellEdgeLines(shell, maps.shellMap, maps.faceMap, maps.ringMap, maps.edgeMap, maps.pointMap, THREE);
+        addMesh(shell, geometry, outline, MESH_OPACITY_SURFACE, 'surface');
       });
-    } else if (faces.length) {
+      parcels.forEach(parcel => {
+        const geometry = buildPolygonGeometry(parcel, maps.edgeMap, maps.pointMap, THREE);
+        if (!geometry) return;
+        const outline = buildPolygonEdgeLines(parcel, maps.edgeMap, maps.pointMap, THREE);
+        addMesh(parcel, geometry, outline, MESH_OPACITY_PARCEL, 'parcel');
+      });
+      return;
+    }
+
+    if (faces.length) {
       // Simple-polygon case: one or more Faces with no owning Shell/Solid.
-      const opacity = needsTransparency(data) ? 0.85 : 1.0;
-      faces.forEach((face, i) => {
+      const opacity = needsTransparency(data) ? MESH_OPACITY_TRANSPARENT : MESH_OPACITY_OPAQUE;
+      faces.forEach(face => {
         const geometry = buildFaceGeometry(face, maps.ringMap, maps.edgeMap, maps.pointMap, THREE);
         if (!geometry) return;
         const outline = buildFaceOutline(face, maps.ringMap, maps.edgeMap, maps.pointMap, THREE);
-        addMesh(face, i, geometry, outline, opacity);
+        addMesh(face, geometry, outline, opacity, 'face');
       });
     } else if (rings.length) {
       // Flattest simple-polygon case: bare Rings with no owning Face at all.
-      rings.forEach((ring, i) => {
+      rings.forEach(ring => {
         const geometry = buildRingGeometry(ring, maps.edgeMap, maps.pointMap, THREE);
         if (!geometry) return;
         const outline = buildRingOutline(ring, maps.edgeMap, maps.pointMap, THREE);
-        addMesh(ring, i, geometry, outline, 1.0);
+        addMesh(ring, geometry, outline, MESH_OPACITY_OPAQUE, 'ring');
       });
     } else if (hasEdges) {
       // Bare edges: no fill, so the edges toggle (on by default) already shows something; vertices
@@ -316,6 +415,26 @@ export default class TopoFeaturePlugin {
     }
   }
 
+  _applyRenderableVisibility(record) {
+    record.mesh.visible = record.visible;
+    record.edges.visible = record.visible && this._showEdges;
+    record.vertices.visible = record.visible && this._showVertices;
+  }
+
+  _kindAllVisible(kind) {
+    const records = this._renderables.filter(r => r.kind === kind);
+    return records.length > 0 && records.every(r => r.visible);
+  }
+
+  _toggleKind(kind) {
+    const next = !this._kindAllVisible(kind);
+    this._renderables.filter(r => r.kind === kind).forEach(r => {
+      r.visible = next;
+      this._applyRenderableVisibility(r);
+    });
+    this._refreshFullscreenPanel();
+  }
+
   _fitCamera(THREE) {
     const allObjects = [...this._solidMeshes, ...this._solidEdges, ...this._solidVertices];
     if (!allObjects.length) return;
@@ -328,34 +447,130 @@ export default class TopoFeaturePlugin {
     const maxDim = Math.max(size.x, size.y, size.z);
     const dist = maxDim * 2;
 
-    this._camera.position.set(center.x - dist * 0.7, center.y - dist * 0.7, center.z + dist * 0.7);
-    this._camera.near = dist * 0.001;
-    this._camera.far = dist * 100;
-    this._camera.updateProjectionMatrix();
+    const camera = this._camera;
+    camera.position.set(center.x - dist * 0.7, center.y - dist * 0.7, center.z + dist * 0.7);
+    camera.near = dist * 0.001;
+    camera.far = dist * 100;
+    camera.zoom = 1;
+    camera.updateProjectionMatrix();
     this._controls.target.copy(center);
+    this._syncProjection();
     this._controls.update();
 
-    this._initialCameraPosition = this._camera.position.clone();
+    this._initialCameraPosition = camera.position.clone();
     this._initialCameraTarget = this._controls.target.clone();
+    this._initialCameraZoom = camera.zoom;
   }
+
+  // ─── Projection (perspective ⇄ orthographic) ─────────────────────────────────
+
+  _halfHeightAtDistance(distance) {
+    return distance * Math.tan(this._THREE.MathUtils.degToRad(CAMERA_FOV / 2));
+  }
+
+  _setOrthographicHalfHeight(halfHeight) {
+    const safeHalfHeight = Math.max(halfHeight, MIN_FRUSTUM_HALF_HEIGHT);
+    const halfWidth = safeHalfHeight * (this._viewWidth / this._viewHeight);
+    const cam = this._orthographicCamera;
+    cam.top = safeHalfHeight;
+    cam.bottom = -safeHalfHeight;
+    cam.left = -halfWidth;
+    cam.right = halfWidth;
+    cam.updateProjectionMatrix();
+  }
+
+  // Rebuilds the orthographic frustum from the camera's current distance to the controls target.
+  // A no-op while the perspective camera is active, since _setProjection() derives the frustum at
+  // switch time instead. Call after moving the camera/target (fit or reset).
+  _syncProjection() {
+    if (this._projection !== PROJECTION_ORTHOGRAPHIC) return;
+    const distance = this._orthographicCamera.position.distanceTo(this._controls.target);
+    this._setOrthographicHalfHeight(this._halfHeightAtDistance(distance));
+  }
+
+  // Switches between perspective and orthographic projection, preserving the framing: going to
+  // orthographic, the frustum is sized to the perspective view volume at the target plane; coming
+  // back, any accumulated orthographic zoom is converted into a camera distance that reproduces
+  // the same view volume, so repeated toggling is stable rather than drifting.
+  _setProjection(mode) {
+    if (mode === this._projection || !this._camera) return;
+    const THREE = this._THREE;
+    const perspectiveCamera = this._perspectiveCamera;
+    const orthographicCamera = this._orthographicCamera;
+    const controls = this._controls;
+
+    if (mode === PROJECTION_ORTHOGRAPHIC) {
+      const distance = perspectiveCamera.position.distanceTo(controls.target);
+      orthographicCamera.position.copy(perspectiveCamera.position);
+      orthographicCamera.quaternion.copy(perspectiveCamera.quaternion);
+      orthographicCamera.near = perspectiveCamera.near;
+      orthographicCamera.far = perspectiveCamera.far;
+      orthographicCamera.zoom = 1;
+      this._camera = orthographicCamera;
+      this._projection = PROJECTION_ORTHOGRAPHIC;
+      this._setOrthographicHalfHeight(this._halfHeightAtDistance(distance));
+    } else {
+      // camera.top is the unzoomed half-height; three.js divides by camera.zoom when building the
+      // projection matrix, so the visible half-height is top / zoom.
+      const visibleHalfHeight = orthographicCamera.top / orthographicCamera.zoom;
+      const distance = visibleHalfHeight / Math.tan(THREE.MathUtils.degToRad(CAMERA_FOV / 2));
+      const offset = new THREE.Vector3().subVectors(orthographicCamera.position, controls.target);
+
+      perspectiveCamera.quaternion.copy(orthographicCamera.quaternion);
+      perspectiveCamera.near = orthographicCamera.near;
+      perspectiveCamera.far = orthographicCamera.far;
+      perspectiveCamera.zoom = 1;
+      // A zero offset would normalise to (0,0,0) and drop the camera onto the target; leaving the
+      // perspective camera where it was is the safer degenerate-case fallback.
+      if (offset.lengthSq() > 0) {
+        perspectiveCamera.position.copy(controls.target).addScaledVector(offset.normalize(), distance);
+      }
+      perspectiveCamera.updateProjectionMatrix();
+      this._camera = perspectiveCamera;
+      this._projection = PROJECTION_PERSPECTIVE;
+    }
+
+    controls.object = this._camera;
+    controls.update();
+  }
+
+  _projectionTitle() {
+    return this._projection === PROJECTION_PERSPECTIVE ? 'Switch to orthographic view' : 'Switch to perspective view';
+  }
+
+  // ─── Fullscreen ───────────────────────────────────────────────────────────────
+
+  _isFullscreen() {
+    return document.fullscreenElement === this._el;
+  }
+
+  _toggleFullscreen() {
+    if (this._isFullscreen()) {
+      document.exitFullscreen?.();
+    } else {
+      this._el?.requestFullscreen?.();
+    }
+  }
+
+  // ─── Controls ─────────────────────────────────────────────────────────────────
 
   _buildControls(el) {
     const bar = document.createElement('div');
     bar.style.cssText = 'position: absolute; bottom: 8px; left: 8px; display: flex; '
       + 'flex-direction: column; gap: 4px; z-index: 10;';
 
-    const addButton = (icon, title, onClick, isActive) => {
+    const addButton = (icon, title, onClick, isActive, getIcon, getTitle) => {
       const btn = document.createElement('button');
       btn.type = 'button';
-      btn.title = title;
-      btn.innerHTML = ICONS[icon];
-      btn.style.cssText = BUTTON_STYLE + buttonColors(isActive?.());
-      btn.addEventListener('click', () => {
-        onClick();
+      const refresh = () => {
+        btn.title = getTitle ? getTitle() : title;
+        btn.innerHTML = ICONS[getIcon ? getIcon() : icon];
         btn.style.cssText = BUTTON_STYLE + buttonColors(isActive?.());
-      });
+      };
+      refresh();
+      btn.addEventListener('click', () => { onClick(); refresh(); });
       bar.appendChild(btn);
-      return btn;
+      return { btn, refresh };
     };
 
     addButton('reset', 'Reset camera', () => this._resetCamera());
@@ -366,21 +581,128 @@ export default class TopoFeaturePlugin {
     }, () => this._wireframe);
     addButton('edges', 'Toggle edges', () => {
       this._showEdges = !this._showEdges;
-      this._solidEdges.forEach(edge => { edge.visible = this._showEdges; });
+      this._renderables.forEach(r => this._applyRenderableVisibility(r));
+      this._solidEdges.forEach(edge => {
+        if (!this._renderables.some(r => r.edges === edge)) edge.visible = this._showEdges;
+      });
     }, () => this._showEdges);
     addButton('vertices', 'Toggle vertices', () => {
       this._showVertices = !this._showVertices;
-      this._solidVertices.forEach(v => { v.visible = this._showVertices; });
+      this._renderables.forEach(r => this._applyRenderableVisibility(r));
+      this._solidVertices.forEach(v => {
+        if (!this._renderables.some(r => r.vertices === v)) v.visible = this._showVertices;
+      });
     }, () => this._showVertices);
+
+    this._kindToggleButtons = INLINE_KIND_TOGGLES
+      .filter(({ kind }) => this._renderables.some(r => r.kind === kind))
+      .map(({ kind, icon, label }) =>
+        addButton(icon, `Toggle ${label}`, () => this._toggleKind(kind), () => this._kindAllVisible(kind))
+      );
+
+    addButton('projection', this._projectionTitle(),
+      () => this._setProjection(this._projection === PROJECTION_PERSPECTIVE ? PROJECTION_ORTHOGRAPHIC : PROJECTION_PERSPECTIVE),
+      () => this._projection === PROJECTION_ORTHOGRAPHIC,
+      undefined,
+      () => this._projectionTitle());
+
+    const fullscreenButton = addButton('fullscreen', 'Fullscreen',
+      () => this._toggleFullscreen(),
+      () => this._isFullscreen(),
+      () => this._isFullscreen() ? 'fullscreenExit' : 'fullscreen',
+      () => this._isFullscreen() ? 'Exit fullscreen' : 'Fullscreen');
 
     el.appendChild(bar);
     this._controlsEl = bar;
+
+    this._buildFullscreenPanel(el);
+
+    this._fullscreenChangeHandler = () => {
+      if (this._el !== el) return; // stale instance
+      const isFs = this._isFullscreen();
+      this._kindToggleButtons.forEach(({ btn }) => { btn.style.display = isFs ? 'none' : ''; });
+      this._fullscreenPanelEl.style.display = isFs ? 'block' : 'none';
+      fullscreenButton.refresh();
+    };
+    document.addEventListener('fullscreenchange', this._fullscreenChangeHandler);
+  }
+
+  // Collapsible per-type/per-instance visibility panel, shown only in fullscreen (see
+  // _fullscreenChangeHandler) — the inline toolbar's per-kind icons are a coarser "toggle every
+  // instance of this type" affordance meant for the compact embedded view; this panel adds the
+  // ability to override one specific instance without hiding the rest of its type.
+  _buildFullscreenPanel(el) {
+    const panel = document.createElement('div');
+    panel.style.cssText = 'position: absolute; top: 8px; right: 8px; max-width: 260px; '
+      + 'max-height: calc(100% - 16px); overflow-y: auto; background: rgba(255,255,255,0.95); '
+      + 'border-radius: 6px; padding: 8px; font: 12px/1.4 sans-serif; color: #222; '
+      + 'box-shadow: 0 1px 3px rgba(0,0,0,0.4); display: none; z-index: 10;';
+    el.appendChild(panel);
+    this._fullscreenPanelEl = panel;
+    this._refreshFullscreenPanel();
+  }
+
+  _refreshFullscreenPanel() {
+    const panel = this._fullscreenPanelEl;
+    if (!panel) return;
+    panel.innerHTML = '';
+
+    const kinds = [...new Set(this._renderables.map(r => r.kind))];
+    kinds.forEach(kind => {
+      const records = this._renderables.filter(r => r.kind === kind);
+      const allVisible = records.every(r => r.visible);
+      const noneVisible = records.every(r => !r.visible);
+
+      const details = document.createElement('details');
+      details.open = true;
+      details.style.cssText = 'margin-bottom: 6px;';
+
+      const summary = document.createElement('summary');
+      summary.style.cssText = 'cursor: pointer; display: flex; align-items: center; gap: 6px;';
+
+      const groupCheckbox = document.createElement('input');
+      groupCheckbox.type = 'checkbox';
+      groupCheckbox.checked = allVisible;
+      groupCheckbox.indeterminate = !allVisible && !noneVisible;
+      // Prevent the checkbox click from also toggling the <details> open/closed state.
+      groupCheckbox.addEventListener('click', e => e.stopPropagation());
+      groupCheckbox.addEventListener('change', () => {
+        records.forEach(r => { r.visible = groupCheckbox.checked; this._applyRenderableVisibility(r); });
+        this._refreshFullscreenPanel();
+      });
+
+      summary.append(groupCheckbox, document.createTextNode(`${KIND_PANEL_LABELS[kind] || kind} (${records.length})`));
+      details.appendChild(summary);
+
+      const list = document.createElement('div');
+      list.style.cssText = 'padding-left: 20px; margin-top: 4px;';
+      records.forEach(record => {
+        const label = document.createElement('label');
+        label.style.cssText = 'display: block; margin: 2px 0; cursor: pointer;';
+        const checkbox = document.createElement('input');
+        checkbox.type = 'checkbox';
+        checkbox.checked = record.visible;
+        checkbox.addEventListener('change', () => {
+          record.visible = checkbox.checked;
+          this._applyRenderableVisibility(record);
+          this._refreshFullscreenPanel();
+        });
+        label.append(checkbox, document.createTextNode(` ${record.label}`));
+        list.appendChild(label);
+      });
+      details.appendChild(list);
+
+      panel.appendChild(details);
+    });
   }
 
   _resetCamera() {
     if (!this._initialCameraPosition || !this._camera || !this._controls) return;
     this._camera.position.copy(this._initialCameraPosition);
+    this._camera.zoom = this._initialCameraZoom;
+    this._camera.updateProjectionMatrix();
     this._controls.target.copy(this._initialCameraTarget);
+    this._syncProjection();
     this._controls.update();
   }
 
@@ -391,6 +713,10 @@ export default class TopoFeaturePlugin {
     if (this._resizeObserver) {
       this._resizeObserver.disconnect();
       this._resizeObserver = null;
+    }
+    if (this._fullscreenChangeHandler) {
+      document.removeEventListener('fullscreenchange', this._fullscreenChangeHandler);
+      this._fullscreenChangeHandler = null;
     }
     if (this._renderer) {
       this._renderer.dispose();
@@ -403,6 +729,11 @@ export default class TopoFeaturePlugin {
     this._solidMeshes = [];
     this._solidEdges = [];
     this._solidVertices = [];
+    this._renderables = [];
+    this._kindToggleButtons = [];
+    this._fullscreenPanelEl = null;
+    this._perspectiveCamera = null;
+    this._orthographicCamera = null;
     this._camera = null;
     this._controls = null;
     this._gridHelper = null;

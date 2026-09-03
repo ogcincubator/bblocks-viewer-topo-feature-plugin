@@ -30,7 +30,7 @@ dependency) and imported as `import('@ogc/bblocks-viewer-plugin-types')` in JSDo
 
 | Export | Matches | Notes |
 |---|---|---|
-| `TopoFeaturePlugin` | `application/geo+json`, `application/json`, `application/ld+json` whose content is a topo-feature topology document (`points`/`edges`/`rings`/`faces`/`shells`/`solids`) **and** whose `points` carry a 3D coordinate | Three.js scene with orbit controls, grid/wireframe/edges/vertices toggles and a reset-camera button, rendered as plain DOM (no Vuetify/mdi — those are host-only). Renders whichever geometry is richest — bare points, bare edges, a standalone Face/Ring, or a full Solid — not solids only; a 2D-only topo-feature document is left to the default GeoJSON/map view. |
+| `TopoFeaturePlugin` | `application/geo+json`, `application/json`, `application/ld+json` whose content is a topo-feature topology document (`points`/`edges`/`rings`/`faces`/`shells`/`solids`) **and** whose `points` carry a 3D coordinate | Three.js scene with orbit controls, grid/wireframe/edges/vertices toggles, a perspective ⇄ orthographic projection toggle, a fullscreen toggle, and a reset-camera button, rendered as plain DOM (no Vuetify/mdi — those are host-only). Solids, open shells (surfaces not already drawn as part of a solid) and Polygon-topology parcels render together whenever any is present, each its own color-grouped tier with its own inline toggle icon (shown only when that kind actually has content); falls back to the older single-tier chain — a standalone Face/Ring, bare edges, or bare points — only when none of the three is present. Fullscreen additionally swaps the compact icon toolbar for a collapsible panel grouped by kind, with a per-type select-all checkbox and per-instance checkboxes underneath it for overriding one object individually. A 2D-only topo-feature document is left to the default GeoJSON/map view. |
 
 ## Build
 
@@ -58,6 +58,40 @@ actually hits the same cached instance for both plugins.
 than importing it itself, so its mesh-building runs against the exact CDN-resolved module instance
 the scene uses — never reintroduce a top-level `import ... from 'three'` there, or Vite will bundle
 a second, separate copy of three from the local devDependency.
+
+## Standalone test harness
+
+`harness/` lets you exercise the actual `TopoFeaturePlugin` class — the real one from `src/`, not
+a reimplementation — outside bblocks-viewer, either against a bundled fixture or an arbitrary
+source document. Useful for visually checking geometry-engine behaviour (open shells, nested
+shell traversal, Polygon parcels, the datum-grid fix, projection/fullscreen) without needing a
+full register build.
+
+It's a zero-build static page — no `npm install`/dev server required, since the plugin itself
+never uses a bare `import 'three'` (it fetches `three`/`OrbitControls` from esm.sh via
+already-resolved runtime `import()` calls; an import map can't and doesn't need to intercept
+those). The only actual bare specifier in the dependency graph is `topo-geometry.js`'s
+`import earcut from 'earcut'`, resolved via `harness/index.html`'s own import map.
+
+```bash
+npx serve .          # from the repo root
+# then open http://localhost:<port>/harness/  (note the trailing slash — some static
+# servers 30x-redirect a bare /harness to a path without one, which breaks the page's own
+# relative ./main.js and ./fixtures/*.json requests)
+```
+
+Plain `file://` won't work — the fixture `fetch()` calls need `http(s)`.
+
+The toolbar offers:
+- A **Fixture** dropdown over `harness/fixtures/*.json` (copied from `3d-csdm-profile-wa`'s
+  `assets/threeJS-viewer/data/`) — includes cases exercising solids, open shells (including
+  nested/offset-derived shells), Polygon parcels, and a solid-with-void negative control (should
+  render zero open shells, since both its shells are used by the solid).
+- A **File** input to load a local JSON/GeoJSON document.
+- A **URL** box to fetch and render an arbitrary remote document.
+
+There's no automated test suite yet — `npm run typecheck` (tsc, types only) is the only
+CI-checked verification; the harness is for manual/visual inspection.
 
 ## Declaring in a register
 
