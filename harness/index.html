@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>TopoFeaturePlugin harness</title>
+  <style>
+    html, body { margin: 0; height: 100%; font: 14px/1.4 system-ui, sans-serif; background: #1b1e20; color: #eee; }
+    #toolbar {
+      display: flex; flex-wrap: wrap; gap: 14px; align-items: center;
+      padding: 10px 14px; background: #24282b; border-bottom: 1px solid #333;
+    }
+    #toolbar label { display: flex; align-items: center; gap: 6px; font-size: 13px; }
+    select, input[type=text] { background: #333; color: #eee; border: 1px solid #555; border-radius: 4px; padding: 4px 6px; }
+    button { background: #3388ff; color: #fff; border: none; border-radius: 4px; padding: 4px 10px; cursor: pointer; }
+    button:hover { background: #2277ee; }
+    #status { font-size: 12px; color: #aaa; margin-left: auto; }
+    #host { height: calc(100vh - 49px); width: 100%; position: relative; }
+  </style>
+</head>
+<body>
+  <div id="toolbar">
+    <label>Fixture: <select id="fixtureSelect"></select></label>
+    <label>File: <input type="file" id="fileInput" accept="application/json,.json,.geojson" /></label>
+    <label>URL: <input type="text" id="urlInput" placeholder="https://.../example.json" size="42" /></label>
+    <button id="urlLoad" type="button">Load</button>
+    <span id="status"></span>
+  </div>
+  <div id="host"></div>
+
+  <!--
+    Zero-build harness: no npm install / dev server required, just serve this directory
+    statically (plain `file://` won't work — the fixture `fetch()` calls below need http(s)).
+    TopoFeaturePlugin itself never uses a bare `import 'three'` — it fetches three/OrbitControls
+    from esm.sh via fully-resolved runtime `import()` calls (see topo-feature-plugin.js's
+    THREE_VERSION), which an import map can't and doesn't need to intercept. The one real bare
+    specifier in the dependency graph is topo-geometry.js's static `import earcut from 'earcut'`,
+    resolved below. Keep this pinned version in sync with package.json's "earcut" dependency by
+    hand (there's no automated check for this one, unlike THREE_VERSION's
+    scripts/check-three-version.mjs).
+  -->
+  <script type="importmap">
+  {
+    "imports": {
+      "earcut": "https://esm.sh/earcut@3.0.2"
+    }
+  }
+  </script>
+  <script type="module" src="./main.js"></script>
+</body>
+</html>
