@@ -44,6 +44,14 @@ const MIN_FRUSTUM_HALF_HEIGHT = 1e-6;
 const PROJECTION_PERSPECTIVE = 'perspective';
 const PROJECTION_ORTHOGRAPHIC = 'orthographic';
 
+// The collapsible per-type/per-instance panel activates by *size*, not by which control the user
+// clicked to get more space — the host's own "expand to a bigger dialog" affordance resizes this
+// plugin's container exactly like this plugin's own fullscreen button does, and both should have
+// the same effect without a second, separate opt-in. The host gives this container a fixed ~300px
+// height inline; anything meaningfully taller than that (its own fullscreen dialog, or this
+// plugin's requestFullscreen()) crosses this threshold.
+const EXPANDED_VIEW_MIN_HEIGHT = 400;
+
 // Per-kind mesh opacity. Solids (and standalone faces/rings) additionally go semi-transparent
 // only when needsTransparency() finds a hole/void that would otherwise hide interior geometry;
 // surfaces and parcels are always uniformly translucent since they're most useful shown alongside
@@ -291,6 +299,7 @@ export default class TopoFeaturePlugin {
       this._perspectiveCamera.updateProjectionMatrix();
       this._setOrthographicHalfHeight(this._orthographicCamera.top || 1);
       renderer.setSize(w, h);
+      this._applyViewMode();
     });
     this._resizeObserver.observe(canvasContainer);
 
@@ -616,19 +625,38 @@ export default class TopoFeaturePlugin {
     this._controlsEl = bar;
 
     this._buildFullscreenPanel(el);
+    this._applyViewMode(); // el may already be large at mount time (e.g. host opens straight into its own expanded dialog)
 
+    // Only refreshes the fullscreen button's own icon/tooltip — see _applyViewMode() for the
+    // panel/icon swap, which is driven by container size (via the ResizeObserver in _mount()) so
+    // it also reacts to the host's own "expand" affordance, not just this button.
     this._fullscreenChangeHandler = () => {
       if (this._el !== el) return; // stale instance
-      const isFs = this._isFullscreen();
-      this._kindToggleButtons.forEach(({ btn }) => { btn.style.display = isFs ? 'none' : ''; });
-      this._fullscreenPanelEl.style.display = isFs ? 'block' : 'none';
       fullscreenButton.refresh();
+      this._applyViewMode();
     };
     document.addEventListener('fullscreenchange', this._fullscreenChangeHandler);
   }
 
-  // Collapsible per-type/per-instance visibility panel, shown only in fullscreen (see
-  // _fullscreenChangeHandler) — the inline toolbar's per-kind icons are a coarser "toggle every
+  // Swaps between the compact inline toolbar (per-kind toggle icons) and the collapsible
+  // per-type/per-instance panel, based on how much space the host has actually given this
+  // container — not on which specific control (this plugin's own fullscreen button, or the host's
+  // own "expand" affordance) got it there. The host resizes this container the same way for both,
+  // so treating them identically means a user who expands via the host's own UI gets the richer
+  // panel immediately, without an extra, redundant click on this plugin's own fullscreen button.
+  _applyViewMode() {
+    if (!this._kindToggleButtons || !this._fullscreenPanelEl) return;
+    const expanded = this._isExpandedView();
+    this._kindToggleButtons.forEach(({ btn }) => { btn.style.display = expanded ? 'none' : ''; });
+    this._fullscreenPanelEl.style.display = expanded ? 'block' : 'none';
+  }
+
+  _isExpandedView() {
+    return !!this._el && this._el.clientHeight >= EXPANDED_VIEW_MIN_HEIGHT;
+  }
+
+  // Collapsible per-type/per-instance visibility panel, shown whenever the container is large
+  // (see _applyViewMode()) — the inline toolbar's per-kind icons are a coarser "toggle every
   // instance of this type" affordance meant for the compact embedded view; this panel adds the
   // ability to override one specific instance without hiding the rest of its type.
   _buildFullscreenPanel(el) {
