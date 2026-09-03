@@ -61,30 +61,16 @@ a second, separate copy of three from the local devDependency.
 
 ## Standalone test harness
 
-`harness/` lets you exercise the actual `TopoFeaturePlugin` class — the real one from `src/`, not
-a reimplementation — outside bblocks-viewer, either against a bundled fixture or an arbitrary
+`harness/index.html` lets you exercise the actual `TopoFeaturePlugin` class — outside bblocks-viewer, either against a bundled fixture or an arbitrary
 source document. Useful for visually checking geometry-engine behaviour (open shells, nested
 shell traversal, Polygon parcels, the datum-grid fix, projection/fullscreen) without needing a
 full register build.
 
-It's a zero-build static page — no `npm install`/dev server required, since the plugin itself
-never uses a bare `import 'three'` (it fetches `three`/`OrbitControls` from esm.sh via
-already-resolved runtime `import()` calls; an import map can't and doesn't need to intercept
-those). The only actual bare specifier in the dependency graph is `topo-geometry.js`'s
-`import earcut from 'earcut'`, resolved via `harness/index.html`'s own import map.
 
-```bash
-npx serve .          # from the repo root
-# then open http://localhost:<port>/harness/  (note the trailing slash — some static
-# servers 30x-redirect a bare /harness to a path without one, which breaks the page's own
-# relative ./main.js and ./fixtures/*.json requests)
-```
-
-Plain `file://` won't work — the fixture `fetch()` calls need `http(s)`.
+_Plain `file://` won't work — the fixture `fetch()` calls need `http(s)`._
 
 The toolbar offers:
-- A **Fixture** dropdown over `harness/fixtures/*.json` (copied from `3d-csdm-profile-wa`'s
-  `assets/threeJS-viewer/data/`) — includes cases exercising solids, open shells (including
+- A **Fixture** dropdown over `harness/fixtures/*.json`  — includes cases exercising solids, open shells (including
   nested/offset-derived shells), Polygon parcels, and a solid-with-void negative control (should
   render zero open shells, since both its shells are used by the solid).
 - A **File** input to load a local JSON/GeoJSON document.
@@ -93,13 +79,13 @@ The toolbar offers:
 There's no automated test suite yet — `npm run typecheck` (tsc, types only) is the only
 CI-checked verification; the harness is for manual/visual inspection.
 
-## Declaring in a register
+## Declaring as a viewer in a Building Blocks repository
 
 ```yaml
 # bblocks-config.yaml
 viewer:
   view-plugins:
-    - url: https://example.org/bblocks-viewer-topo-feature-plugin/index.js
+    - url: https://cdn.jsdelivr.net/gh/ogcincubator/bblocks-viewer-topo-feature-plugin@dist/index.js
       export: TopoFeaturePlugin
       weight: 100   # optional; higher sorts earlier among plugin tabs
 ```
