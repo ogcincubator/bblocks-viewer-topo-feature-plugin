@@ -61,16 +61,32 @@ const MESH_OPACITY_TRANSPARENT = 0.85;
 const MESH_OPACITY_SURFACE = 0.55;
 const MESH_OPACITY_PARCEL = 0.35;
 
-// Kinds that get a dedicated inline toggle icon (only when present) and their inline label. Every
-// kind actually rendered (including the legacy face/ring fallback tiers, which have no inline
-// icon) still gets its own section in the fullscreen per-instance panel — see
-// _refreshFullscreenPanel().
-const INLINE_KIND_TOGGLES = [
-  { kind: 'parcel', icon: 'parcels', label: 'parcels' },
-  { kind: 'surface', icon: 'surfaces', label: 'surfaces' },
-  { kind: 'solid', icon: 'solids', label: 'solids' },
-];
-const KIND_PANEL_LABELS = { parcel: 'Parcels', surface: 'Surfaces', solid: 'Solids', face: 'Faces', ring: 'Rings' };
+// Presentation for the plugin's own built-in kinds (see default-config.js) — the only kinds with
+// hand-drawn icons, so the only ones that ever get a compact inline toggle button; every kind
+// actually rendered (including these, plus anything a per-block config's own rules introduce)
+// still gets its own section in the fullscreen per-instance panel — see _refreshFullscreenPanel().
+// A kind with no entry here (only possible via a per-block config's own rule, since the built-in
+// default rule set never produces one) falls back to no inline icon and a humanized version of
+// its own name in the panel — see humanizeKind() below.
+const KIND_PRESENTATION = {
+  parcel: { icon: 'parcels', inlineLabel: 'parcels', panelLabel: 'Parcels' },
+  surface: { icon: 'surfaces', inlineLabel: 'surfaces', panelLabel: 'Surfaces' },
+  solid: { icon: 'solids', inlineLabel: 'solids', panelLabel: 'Solids' },
+  face: { panelLabel: 'Faces' },
+  ring: { panelLabel: 'Rings' },
+};
+// Inline toggle buttons are offered in this fixed order, for whichever of these three kinds is
+// actually present — matches the pre-Stage-2 fixed order exactly.
+const INLINE_ICON_KIND_ORDER = ['parcel', 'surface', 'solid'];
+
+// "former-tenure-parcel" -> "Former tenure parcel" — the panel label for any kind a per-block
+// config's own rules introduce that isn't one of the plugin's built-in kinds above. No attempt at
+// pluralization; a plain humanization is enough for the panel to read as something other than a
+// raw rule-config slug.
+function humanizeKind(kind) {
+  const words = String(kind).replace(/[-_]+/g, ' ').trim();
+  return words ? words.charAt(0).toUpperCase() + words.slice(1) : String(kind);
+}
 
 const BUTTON_STYLE = 'width: 26px; height: 26px; border: none; border-radius: 4px; cursor: pointer; '
   + 'display: flex; align-items: center; justify-content: center; padding: 0; '
@@ -146,6 +162,10 @@ export default class TopoFeaturePlugin {
     // toggle icons and the fullscreen per-type/per-instance panel from one shared visibility
     // state. Bare edge/point "soup" tiers (no discrete named objects) aren't recorded here.
     this._renderables = [];
+    // The effective rule config for the current render — the plugin's own built-in defaults
+    // (default-config.js), merged with a per-block override if context.bblock declares one (see
+    // resolve-config.js). Resolved fresh in _buildScene(); null until then.
+    this._config = null;
     this._initialCameraPosition = null;
     this._initialCameraTarget = null;
     this._initialCameraZoom = 1;
@@ -334,23 +354,24 @@ export default class TopoFeaturePlugin {
       },
       { classifyFeatures },
       { buildDefaultConfig },
+      { loadViewerConfig },
     ] = await Promise.all([
       import('./utils/topo-geometry.js'),
       import('./utils/rules.js'),
       import('./utils/default-config.js'),
+      import('./utils/resolve-config.js'),
     ]);
 
     const maps = buildMaps(data);
     const openShells = getOpenShells(data, maps);
     const opaqueOrTransparent = needsTransparency(data) ? MESH_OPACITY_TRANSPARENT : MESH_OPACITY_OPAQUE;
 
-    // No per-block config exists yet (Stage 2) — classification always runs against the plugin's
-    // own built-in default rule set, which reproduces the pre-rule-engine tiering exactly (see
-    // default-config.js). `__openShells` is a synthetic source: open shells aren't a plain
+    // The plugin's own built-in default rule set, reproducing the pre-rule-engine tiering exactly
+    // (see default-config.js). `__openShells` is a synthetic source: open shells aren't a plain
     // top-level document array like `solids`/`parcels`, they're derived from the solid/shell
     // reference graph, so that derivation still happens here rather than inside the (otherwise
     // document-shape-agnostic) rule engine.
-    const config = buildDefaultConfig(
+    const defaultConfig = buildDefaultConfig(
       {
         solidCount: getFeatures(data.solids || []).length,
         openShellCount: openShells.length,
@@ -367,8 +388,14 @@ export default class TopoFeaturePlugin {
       }
     );
 
-    if (config.rules.length) {
-      const descriptors = classifyFeatures({ ...data, __openShells: openShells }, config);
+    // A per-block config (declared as a bblock.json `resources` entry, see resolve-config.js) is
+    // merged over these defaults if the host gave us a context.bblock that declares one; falls
+    // straight back to defaultConfig — unchanged — for every existing example, the harness
+    // (context.bblock is never supplied there), and any fetch/parse failure.
+    this._config = await loadViewerConfig(this._context, defaultConfig);
+
+    if (this._config.rules.length) {
+      const descriptors = classifyFeatures({ ...data, __openShells: openShells }, this._config);
 
       // One entry per `geometry` strategy a rule can name — each wraps the matching pair of
       // build*/build*EdgeLines (or build*Outline) functions from topo-geometry.js behind a
@@ -631,11 +658,12 @@ export default class TopoFeaturePlugin {
       });
     }, () => this._showVertices);
 
-    this._kindToggleButtons = INLINE_KIND_TOGGLES
-      .filter(({ kind }) => this._renderables.some(r => r.kind === kind))
-      .map(({ kind, icon, label }) =>
-        addButton(icon, `Toggle ${label}`, () => this._toggleKind(kind), () => this._kindAllVisible(kind))
-      );
+    this._kindToggleButtons = INLINE_ICON_KIND_ORDER
+      .filter(kind => this._renderables.some(r => r.kind === kind))
+      .map(kind => {
+        const { icon, inlineLabel } = KIND_PRESENTATION[kind];
+        return addButton(icon, `Toggle ${inlineLabel}`, () => this._toggleKind(kind), () => this._kindAllVisible(kind));
+      });
 
     addButton('projection', this._projectionTitle(),
       () => this._setProjection(this._projection === PROJECTION_PERSPECTIVE ? PROJECTION_ORTHOGRAPHIC : PROJECTION_PERSPECTIVE),
@@ -727,7 +755,8 @@ export default class TopoFeaturePlugin {
         this._refreshFullscreenPanel();
       });
 
-      summary.append(groupCheckbox, document.createTextNode(`${KIND_PANEL_LABELS[kind] || kind} (${records.length})`));
+      const panelLabel = KIND_PRESENTATION[kind]?.panelLabel || humanizeKind(kind);
+      summary.append(groupCheckbox, document.createTextNode(`${panelLabel} (${records.length})`));
       details.appendChild(summary);
 
       const list = document.createElement('div');
@@ -786,6 +815,7 @@ export default class TopoFeaturePlugin {
     this._solidEdges = [];
     this._solidVertices = [];
     this._renderables = [];
+    this._config = null;
     this._kindToggleButtons = [];
     this._fullscreenPanelEl = null;
     this._perspectiveCamera = null;
