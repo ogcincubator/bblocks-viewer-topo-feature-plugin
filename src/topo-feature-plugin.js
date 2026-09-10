@@ -325,87 +325,115 @@ export default class TopoFeaturePlugin {
   // or Ring ("simple polygon"), bare Edges, or bare Points — matching how leaner topo-feature
   // examples (not solids/parcels at all) are actually authored.
   async _buildScene(scene, THREE, data) {
-    const {
-      buildMaps, buildSolidGeometry, buildSolidEdgeLines, buildShellGeometry, buildShellEdgeLines,
-      buildFaceGeometry, buildFaceOutline, buildRingGeometry, buildRingOutline,
-      buildPolygonGeometry, buildPolygonEdgeLines, buildAllEdgeLines, buildPointMarkers,
-      createSolidMesh, createVertexMarkers, getFeatures, getOpenShells, needsTransparency,
-    } = await import('./utils/topo-geometry.js');
+    const [
+      {
+        buildMaps, buildSolidGeometry, buildSolidEdgeLines, buildShellGeometry, buildShellEdgeLines,
+        buildFaceGeometry, buildFaceOutline, buildRingGeometry, buildRingOutline,
+        buildPolygonGeometry, buildPolygonEdgeLines, buildAllEdgeLines, buildPointMarkers,
+        createSolidMesh, createVertexMarkers, getFeatures, getOpenShells, needsTransparency,
+      },
+      { classifyFeatures },
+      { buildDefaultConfig },
+    ] = await Promise.all([
+      import('./utils/topo-geometry.js'),
+      import('./utils/rules.js'),
+      import('./utils/default-config.js'),
+    ]);
 
     const maps = buildMaps(data);
-    const solids = getFeatures(data.solids || []);
     const openShells = getOpenShells(data, maps);
-    const parcels = getFeatures(data.parcels || []);
-    const faces = getFeatures(data.faces || []);
-    const rings = getFeatures(data.rings || []);
-    const hasEdges = Object.keys(maps.edgeMap).length > 0;
-    const hasPoints = Object.keys(maps.pointMap).length > 0;
+    const opaqueOrTransparent = needsTransparency(data) ? MESH_OPACITY_TRANSPARENT : MESH_OPACITY_OPAQUE;
 
-    let colorIndex = 0;
-    const addMesh = (feature, geometry, outline, opacity, kind) => {
-      const mesh = createSolidMesh(feature, colorIndex++, geometry, opacity, THREE);
-      const vertices = createVertexMarkers(geometry, THREE);
-      mesh.material.wireframe = this._wireframe;
-      scene.add(mesh, outline, vertices);
-      this._solidMeshes.push(mesh);
-      this._solidEdges.push(outline);
-      this._solidVertices.push(vertices);
-      const label = feature.properties?.appellation?.label
-        || feature.properties?.appellation
-        || feature.properties?.description
-        || feature.properties?.name
-        || feature.id;
-      const record = { mesh, edges: outline, vertices, kind, label: String(label), visible: true };
-      this._renderables.push(record);
-      this._applyRenderableVisibility(record);
-    };
-
-    const hasPrimaryTier = solids.length > 0 || openShells.length > 0 || parcels.length > 0;
-
-    if (hasPrimaryTier) {
-      if (solids.length) {
-        const opacity = needsTransparency(data) ? MESH_OPACITY_TRANSPARENT : MESH_OPACITY_OPAQUE;
-        solids.forEach(solid => {
-          const { geometry } = buildSolidGeometry(solid, maps.shellMap, maps.faceMap, maps.ringMap, maps.edgeMap, maps.pointMap, THREE);
-          const outline = buildSolidEdgeLines(solid, maps.shellMap, maps.faceMap, maps.ringMap, maps.edgeMap, maps.pointMap, THREE);
-          addMesh(solid, geometry, outline, opacity, 'solid');
-        });
+    // No per-block config exists yet (Stage 2) — classification always runs against the plugin's
+    // own built-in default rule set, which reproduces the pre-rule-engine tiering exactly (see
+    // default-config.js). `__openShells` is a synthetic source: open shells aren't a plain
+    // top-level document array like `solids`/`parcels`, they're derived from the solid/shell
+    // reference graph, so that derivation still happens here rather than inside the (otherwise
+    // document-shape-agnostic) rule engine.
+    const config = buildDefaultConfig(
+      {
+        solidCount: getFeatures(data.solids || []).length,
+        openShellCount: openShells.length,
+        parcelCount: getFeatures(data.parcels || []).length,
+        faceCount: getFeatures(data.faces || []).length,
+        ringCount: getFeatures(data.rings || []).length,
+      },
+      {
+        solid: opaqueOrTransparent,
+        surface: MESH_OPACITY_SURFACE,
+        parcel: MESH_OPACITY_PARCEL,
+        face: opaqueOrTransparent,
+        ring: MESH_OPACITY_OPAQUE,
       }
-      openShells.forEach(shell => {
-        const { geometry, faceCount } = buildShellGeometry(shell, maps.shellMap, maps.faceMap, maps.ringMap, maps.edgeMap, maps.pointMap, THREE);
-        if (!faceCount) return;
-        const outline = buildShellEdgeLines(shell, maps.shellMap, maps.faceMap, maps.ringMap, maps.edgeMap, maps.pointMap, THREE);
-        addMesh(shell, geometry, outline, MESH_OPACITY_SURFACE, 'surface');
-      });
-      parcels.forEach(parcel => {
-        const geometry = buildPolygonGeometry(parcel, maps.edgeMap, maps.pointMap, THREE);
+    );
+
+    if (config.rules.length) {
+      const descriptors = classifyFeatures({ ...data, __openShells: openShells }, config);
+
+      // One entry per `geometry` strategy a rule can name — each wraps the matching pair of
+      // build*/build*EdgeLines (or build*Outline) functions from topo-geometry.js behind a
+      // uniform (feature) -> geometry|null, (feature) -> outline signature so the render loop
+      // below doesn't need to know which kind it's looking at.
+      const geometryStrategies = {
+        solid: {
+          build: f => buildSolidGeometry(f, maps.shellMap, maps.faceMap, maps.ringMap, maps.edgeMap, maps.pointMap, THREE).geometry,
+          outline: f => buildSolidEdgeLines(f, maps.shellMap, maps.faceMap, maps.ringMap, maps.edgeMap, maps.pointMap, THREE),
+        },
+        'open-shell': {
+          // Matches the pre-rule-engine `if (!faceCount) return;` guard: an open shell with zero
+          // resolvable faces contributes no mesh, even though buildShellGeometry always returns a
+          // (possibly empty) geometry object rather than null on its own.
+          build: f => {
+            const { geometry, faceCount } = buildShellGeometry(f, maps.shellMap, maps.faceMap, maps.ringMap, maps.edgeMap, maps.pointMap, THREE);
+            return faceCount ? geometry : null;
+          },
+          outline: f => buildShellEdgeLines(f, maps.shellMap, maps.faceMap, maps.ringMap, maps.edgeMap, maps.pointMap, THREE),
+        },
+        polygon: {
+          build: f => buildPolygonGeometry(f, maps.edgeMap, maps.pointMap, THREE),
+          outline: f => buildPolygonEdgeLines(f, maps.edgeMap, maps.pointMap, THREE),
+        },
+        face: {
+          build: f => buildFaceGeometry(f, maps.ringMap, maps.edgeMap, maps.pointMap, THREE),
+          outline: f => buildFaceOutline(f, maps.ringMap, maps.edgeMap, maps.pointMap, THREE),
+        },
+        ring: {
+          build: f => buildRingGeometry(f, maps.edgeMap, maps.pointMap, THREE),
+          outline: f => buildRingOutline(f, maps.edgeMap, maps.pointMap, THREE),
+        },
+      };
+
+      let colorIndex = 0;
+      descriptors.forEach(descriptor => {
+        const strategy = geometryStrategies[descriptor.geometry];
+        if (!strategy) return;
+        const geometry = strategy.build(descriptor.feature);
         if (!geometry) return;
-        const outline = buildPolygonEdgeLines(parcel, maps.edgeMap, maps.pointMap, THREE);
-        addMesh(parcel, geometry, outline, MESH_OPACITY_PARCEL, 'parcel');
+        const outline = strategy.outline(descriptor.feature);
+        const opacity = descriptor.style?.opacity ?? MESH_OPACITY_OPAQUE;
+        const mesh = createSolidMesh(descriptor.feature, colorIndex++, geometry, opacity, THREE);
+        const vertices = createVertexMarkers(geometry, THREE);
+        mesh.material.wireframe = this._wireframe;
+        scene.add(mesh, outline, vertices);
+        this._solidMeshes.push(mesh);
+        this._solidEdges.push(outline);
+        this._solidVertices.push(vertices);
+        const record = {
+          mesh, edges: outline, vertices,
+          kind: descriptor.kind, label: descriptor.label, visible: descriptor.initiallyVisible,
+        };
+        this._renderables.push(record);
+        this._applyRenderableVisibility(record);
       });
       return;
     }
 
-    if (faces.length) {
-      // Simple-polygon case: one or more Faces with no owning Shell/Solid.
-      const opacity = needsTransparency(data) ? MESH_OPACITY_TRANSPARENT : MESH_OPACITY_OPAQUE;
-      faces.forEach(face => {
-        const geometry = buildFaceGeometry(face, maps.ringMap, maps.edgeMap, maps.pointMap, THREE);
-        if (!geometry) return;
-        const outline = buildFaceOutline(face, maps.ringMap, maps.edgeMap, maps.pointMap, THREE);
-        addMesh(face, geometry, outline, opacity, 'face');
-      });
-    } else if (rings.length) {
-      // Flattest simple-polygon case: bare Rings with no owning Face at all.
-      rings.forEach(ring => {
-        const geometry = buildRingGeometry(ring, maps.edgeMap, maps.pointMap, THREE);
-        if (!geometry) return;
-        const outline = buildRingOutline(ring, maps.edgeMap, maps.pointMap, THREE);
-        addMesh(ring, geometry, outline, MESH_OPACITY_OPAQUE, 'ring');
-      });
-    } else if (hasEdges) {
+    const hasEdges = Object.keys(maps.edgeMap).length > 0;
+    const hasPoints = Object.keys(maps.pointMap).length > 0;
+    if (hasEdges) {
       // Bare edges: no fill, so the edges toggle (on by default) already shows something; vertices
       // still default off, so turn them on too or points-with-no-edges-drawn-through-them vanish.
+      // No per-feature kind/label to classify here, so this stays outside the rule engine.
       this._showVertices = true;
       const edges = buildAllEdgeLines(maps.edgeMap, maps.pointMap, THREE);
       const vertices = buildPointMarkers(maps.pointMap, THREE);
