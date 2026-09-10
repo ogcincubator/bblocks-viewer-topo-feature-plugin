@@ -1,0 +1,90 @@
+import { valuesMatch } from './curie.js';
+
+// A points/edges/rings/faces/shells/solids/parcels-or-whatever-else array entry is either a
+// nested FeatureCollection wrapper (`{ features: [...] }`) or a bare Feature itself — see the
+// identical helper in topo-geometry.js. Duplicated rather than imported: that module also pulls
+// in earcut and is loaded lazily at render() time (topo-feature-plugin.js), while
+// classifyFeatures() below must run independently of the render path — including from plain unit
+// tests that never touch Three.js/earcut at all.
+function collectionFeatures(item) {
+  return Array.isArray(item?.features) ? item.features : [item];
+}
+
+// Every feature reachable from `data[sourceKey]`, regardless of collection-wrapper shape. Unlike
+// topo-geometry.js's getFeatures(), the source key itself is a parameter here rather than a
+// hard-coded call site (`data.parcels`, `data.solids`, ...) — a rule names whichever top-level
+// collection it wants classified.
+function sourceFeatures(data, sourceKey) {
+  const collections = data?.[sourceKey];
+  return Array.isArray(collections) ? collections.flatMap(collectionFeatures) : [];
+}
+
+// Resolves a dot-path against an object (e.g. getPath(feature, 'properties.parcelState')).
+// Missing/non-object segments resolve to undefined rather than throwing.
+export function getPath(obj, path) {
+  return path.split('.').reduce((value, key) => (value == null ? undefined : value[key]), obj);
+}
+
+// A resolved property value counts as a usable label only if it's a non-empty primitive, or an
+// object exposing a string `.label` (covers a JSON-LD-style `{ "label": "..." }` value without
+// hard-coding which property names use that shape — the config decides which paths to try).
+function usableLabelValue(value) {
+  if (value == null || value === '') return undefined;
+  if (typeof value === 'object') return typeof value.label === 'string' ? value.label : undefined;
+  return String(value);
+}
+
+// Picks the first configured label property that resolves to a usable value, falling back to
+// `labelConfig.fallback` (itself a dot-path, defaulting to 'id') and finally the feature's own id.
+// Generalizes today's hard-coded appellation/description/name/id chain (topo-feature-plugin.js)
+// into a config-supplied property list — this module never names "appellation" itself.
+export function resolveLabel(feature, labelConfig = {}) {
+  const properties = labelConfig.properties || [];
+  for (const path of properties) {
+    const value = usableLabelValue(getPath(feature, path));
+    if (value !== undefined) return value;
+  }
+  const fallbackValue = usableLabelValue(getPath(feature, labelConfig.fallback || 'id'));
+  return fallbackValue ?? String(feature.id);
+}
+
+// True if `rule` claims `feature`. A rule with no `match` is a catch-all for its `source`.
+function matchesRule(feature, rule, context) {
+  if (!rule.match) return true;
+  const actual = getPath(feature, rule.match.property);
+  return valuesMatch(actual, rule.match.values || [], context);
+}
+
+// Classifies every feature reachable from any rule's `source` collection against the ordered rule
+// list: for a given feature, the first rule (in `config.rules` order) whose `source` matches the
+// collection it came from AND whose `match` (if any) applies to it wins. A feature no rule claims
+// is left out of the result rather than guessing at a default — Stage 1 supplies the plugin's
+// built-in rule set that gives every structural kind (solid/surface/parcel/...) a catch-all.
+//
+// `context` defaults to the document's own inline `@context` (the shape topo-feature/JSON-LD
+// examples carry today) so a caller doesn't have to extract it separately in the common case.
+export function classifyFeatures(data, config, context = data?.['@context'] || {}) {
+  const rules = config?.rules || [];
+  const sources = [...new Set(rules.map(rule => rule.source))];
+  const descriptors = [];
+
+  sources.forEach(source => {
+    const rulesForSource = rules.filter(rule => rule.source === source);
+    sourceFeatures(data, source).forEach(feature => {
+      const rule = rulesForSource.find(candidate => matchesRule(feature, candidate, context));
+      if (!rule) return;
+      descriptors.push({
+        feature,
+        source,
+        kind: rule.kind,
+        geometry: rule.geometry,
+        label: resolveLabel(feature, rule.label),
+        style: { ...config?.defaults?.style, ...rule.style },
+        initiallyVisible: rule.initiallyVisible ?? true,
+        elevation: rule.elevation || config?.defaults?.elevation || 'preserve',
+      });
+    });
+  });
+
+  return descriptors;
+}

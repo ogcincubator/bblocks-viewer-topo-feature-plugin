@@ -1,0 +1,132 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { getPath, resolveLabel, classifyFeatures } from './rules.js';
+
+test('getPath resolves a dot-path and returns undefined for a missing segment', () => {
+  const obj = { properties: { parcelState: 'wa-parcel-state:created' } };
+  assert.equal(getPath(obj, 'properties.parcelState'), 'wa-parcel-state:created');
+  assert.equal(getPath(obj, 'properties.missing.deeper'), undefined);
+  assert.equal(getPath(obj, 'nope'), undefined);
+});
+
+test('resolveLabel prefers the first configured property that resolves to a usable value', () => {
+  const feature = { id: 'uuid:1', properties: { appellation: { label: 'Lot 800' }, name: 'unused' } };
+  const label = resolveLabel(feature, {
+    properties: ['properties.appellation.label', 'properties.name'],
+    fallback: 'id',
+  });
+  assert.equal(label, 'Lot 800');
+});
+
+test('resolveLabel falls through empty/missing properties to a later one', () => {
+  const feature = { id: 'uuid:2', properties: { appellation: '', name: 'DP 12346' } };
+  const label = resolveLabel(feature, {
+    properties: ['properties.appellation', 'properties.name'],
+    fallback: 'id',
+  });
+  assert.equal(label, 'DP 12346');
+});
+
+test('resolveLabel reads a { label } object shape without the config naming that convention', () => {
+  const feature = { id: 'uuid:3', properties: { appellation: { label: 'Lot 1' } } };
+  assert.equal(resolveLabel(feature, { properties: ['properties.appellation'] }), 'Lot 1');
+});
+
+test('resolveLabel falls back to the configured fallback path, then feature.id', () => {
+  const feature = { id: 'uuid:4', properties: {} };
+  assert.equal(resolveLabel(feature, { properties: ['properties.name'], fallback: 'id' }), 'uuid:4');
+  assert.equal(resolveLabel(feature, {}), 'uuid:4');
+});
+
+const NON_CADASTRAL_DATA = {
+  '@context': { util: 'http://example.org/utility-status#' },
+  solids: [
+    {
+      type: 'FeatureCollection',
+      features: [
+        { id: 'pipe-1', properties: { assetCondition: 'decommissioned' } },
+        { id: 'pipe-2', properties: { assetCondition: 'util:hazardous' } },
+        { id: 'pipe-3', properties: { assetCondition: 'util:planned' } },
+        { id: 'pipe-4', properties: {} },
+      ],
+    },
+  ],
+};
+
+const NON_CADASTRAL_CONFIG = {
+  defaults: { style: { opacity: 1 } },
+  rules: [
+    {
+      source: 'solids',
+      kind: 'pipe',
+      match: { property: 'properties.assetCondition', values: ['decommissioned'] },
+      initiallyVisible: false,
+      style: { color: '#8a8f89', opacity: 0.25 },
+    },
+    {
+      source: 'solids',
+      kind: 'pipe',
+      match: { property: 'properties.assetCondition', values: ['util:hazardous'] },
+      style: { color: '#c23b22' },
+    },
+    {
+      source: 'solids',
+      kind: 'pipe',
+      match: { property: 'properties.assetCondition', values: ['http://example.org/utility-status#planned'] },
+      style: { color: '#3b5bab' },
+      elevation: 'flatten',
+    },
+    { source: 'solids', kind: 'pipe', geometry: 'solid-topology' },
+  ],
+};
+
+test('classifyFeatures matches literal, CURIE, and full-URI values with no shared vocabulary', () => {
+  const descriptors = classifyFeatures(NON_CADASTRAL_DATA, NON_CADASTRAL_CONFIG);
+  const byId = Object.fromEntries(descriptors.map(d => [d.feature.id, d]));
+
+  assert.equal(byId['pipe-1'].initiallyVisible, false);
+  assert.equal(byId['pipe-1'].style.color, '#8a8f89');
+
+  assert.equal(byId['pipe-2'].style.color, '#c23b22');
+  assert.equal(byId['pipe-2'].initiallyVisible, true); // no initiallyVisible on this rule -> default true
+
+  assert.equal(byId['pipe-3'].style.color, '#3b5bab');
+  assert.equal(byId['pipe-3'].elevation, 'flatten');
+
+  // pipe-4 has no matching property at all -> falls through to the catch-all rule.
+  assert.equal(byId['pipe-4'].geometry, 'solid-topology');
+  assert.equal(byId['pipe-4'].elevation, 'preserve');
+});
+
+test('classifyFeatures applies config.defaults.style under a rule\'s own style', () => {
+  const descriptors = classifyFeatures(NON_CADASTRAL_DATA, NON_CADASTRAL_CONFIG);
+  const pipe2 = descriptors.find(d => d.feature.id === 'pipe-2');
+  assert.equal(pipe2.style.opacity, 1); // inherited from config.defaults.style
+  assert.equal(pipe2.style.color, '#c23b22'); // overridden by the rule
+});
+
+test('classifyFeatures leaves a feature unclassified when no rule for its source matches', () => {
+  const data = { solids: [{ features: [{ id: 'x', properties: { assetCondition: 'other' } }] }] };
+  const config = {
+    rules: [
+      { source: 'solids', kind: 'pipe', match: { property: 'properties.assetCondition', values: ['decommissioned'] } },
+    ],
+  };
+  assert.deepEqual(classifyFeatures(data, config), []);
+});
+
+test('classifyFeatures reads @context from the document by default', () => {
+  const descriptors = classifyFeatures(NON_CADASTRAL_DATA, {
+    rules: [{ source: 'solids', kind: 'pipe', match: { property: 'properties.assetCondition', values: ['util:hazardous'] } }],
+  });
+  assert.equal(descriptors.length, 1);
+  assert.equal(descriptors[0].feature.id, 'pipe-2');
+});
+
+test('classifyFeatures normalizes a bare-Feature source entry, not just FeatureCollection wrappers', () => {
+  const data = { parcels: [{ type: 'Feature', id: 'p1', properties: {} }] };
+  const config = { rules: [{ source: 'parcels', kind: 'parcel' }] };
+  const descriptors = classifyFeatures(data, config);
+  assert.equal(descriptors.length, 1);
+  assert.equal(descriptors[0].feature.id, 'p1');
+});
