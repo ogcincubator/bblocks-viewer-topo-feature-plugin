@@ -158,3 +158,36 @@ test('classifyFeatures elevation flows through to the descriptor unchanged, for 
   const [descriptor] = classifyFeatures(data, { rules: [flattenRule] });
   assert.equal(resolveFlattenZ(descriptor.elevation), 3);
 });
+
+test('classifyFeatures defaults group to the rule\'s own kind when group is not set', () => {
+  const data = { parcels: [{ id: 'p1', properties: {} }] };
+  const [descriptor] = classifyFeatures(data, { rules: [{ source: 'parcels', kind: 'parcel' }] });
+  assert.equal(descriptor.group, 'parcel');
+  assert.equal(descriptor.kindLabel, undefined);
+});
+
+test('classifyFeatures lets several kinds share one group, each keeping its own kindLabel', () => {
+  const data = {
+    parcels: [
+      { id: 'p1', properties: { parcelState: 'created' } },
+      { id: 'p2', properties: { parcelState: 'former-tenure' } },
+    ],
+  };
+  const config = {
+    rules: [
+      {
+        source: 'parcels', kind: 'parcel-former-tenure', group: 'parcel', kindLabel: 'Former Tenure',
+        match: { property: 'properties.parcelState', values: ['former-tenure'] },
+      },
+      { source: 'parcels', kind: 'parcel-created', group: 'parcel', kindLabel: 'Created' },
+    ],
+  };
+  const descriptors = classifyFeatures(data, config);
+  const byId = Object.fromEntries(descriptors.map(d => [d.feature.id, d]));
+  assert.equal(byId.p1.group, 'parcel');
+  assert.equal(byId.p1.kind, 'parcel-created');
+  assert.equal(byId.p1.kindLabel, 'Created');
+  assert.equal(byId.p2.group, 'parcel');
+  assert.equal(byId.p2.kind, 'parcel-former-tenure');
+  assert.equal(byId.p2.kindLabel, 'Former Tenure');
+});

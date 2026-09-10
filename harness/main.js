@@ -10,7 +10,7 @@ const FIXTURES = [
   { label: 'Cube with protrusion', file: 'fixtures/cube-with-protrusion.json' },
   { label: 'Tetrahedron', file: 'fixtures/tetrahedron.json' },
   { label: 'Four unit up/down', file: 'fixtures/4-unit-up-down.json' },
-  { label: 'Parcel (parcels + solid + 1 open shell)', file: 'fixtures/parcel.json' },
+  { label: 'Parcel (parcels + solid + 1 open shell)', file: 'fixtures/parcel.json', config: 'fixtures/parcel-config.json' },
   { label: 'Derived 3D solid (parcels + solid + 3 open shells)', file: 'fixtures/derived-3d-solid.json' },
   {
     // Non-cadastral: pipes classified by assetCondition, no `parcels` array, no WA vocabulary —

@@ -49,7 +49,15 @@ through an ordered list of **rules**, each naming:
   after expansion, so a rule written as a CURIE matches a document using the expanded URI and
   vice versa. A rule with no `match` is a catch-all for its `source`.
 - `kind` — the id used to group this rule's matches for the toggle UI
-- `style` — `{ opacity, color }`
+- `group` *(optional)* — lets several rules with different `kind`s share one panel heading and one
+  inline toggle button (e.g. "Created" and "Former Tenure" both under one "Parcels" heading, each
+  still independently toggleable underneath it). Defaults to the rule's own `kind` — a rule that
+  omits `group` behaves exactly as if grouping didn't exist.
+- `kindLabel` *(optional)* — a human-friendly label for this rule's specific `kind`, shown as its
+  sub-heading when its `group` contains more than one `kind`. Falls back to a humanized version of
+  the `kind` slug when omitted.
+- `style` — `{ opacity, color, lineColor, lineStyle }` — `color`/`opacity` style the filled mesh;
+  `lineColor` and `lineStyle` (`"solid"`, the default, or `"dashed"`) style its outline
 - `initiallyVisible` — boolean, default `true`
 - `label` — `{ properties: [...dot-paths], fallback }`, tried in order; the first property that
   resolves to a usable value wins

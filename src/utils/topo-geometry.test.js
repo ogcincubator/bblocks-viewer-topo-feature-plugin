@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 // importing it, precisely so they work against whichever THREE instance a caller resolved —
 // including, here, this test's own plain Node-side import.
 import * as THREE from 'three';
-import { flattenGeometryZ } from './topo-geometry.js';
+import { flattenGeometryZ, createSolidMesh, SOLID_COLORS, styleOutline } from './topo-geometry.js';
 
 function triangleGeometry() {
   const geometry = new THREE.BufferGeometry();
@@ -72,4 +72,56 @@ test('flattenGeometryZ does not add a normal attribute to a geometry that never 
   const geometry = lineGeometry();
   flattenGeometryZ(geometry, 0);
   assert.equal(geometry.getAttribute('normal'), undefined);
+});
+
+test('createSolidMesh cycles through SOLID_COLORS when no color override is given', () => {
+  const feature = { id: 'f1', properties: {} };
+  const mesh = createSolidMesh(feature, 0, triangleGeometry(), 1, null, THREE);
+  assert.equal(mesh.material.color.getHex(), SOLID_COLORS[0]);
+  const mesh2 = createSolidMesh(feature, 1, triangleGeometry(), 1, null, THREE);
+  assert.equal(mesh2.material.color.getHex(), SOLID_COLORS[1]);
+});
+
+test('createSolidMesh uses a rule-supplied color over the cycling palette when given', () => {
+  const feature = { id: 'f1', properties: {} };
+  const mesh = createSolidMesh(feature, 0, triangleGeometry(), 1, '#a1531a', THREE);
+  assert.equal(mesh.material.color.getHexString(), 'a1531a');
+});
+
+function outlineFixture() {
+  return new THREE.LineSegments(lineGeometry(), new THREE.LineBasicMaterial({ color: 0xffffff }));
+}
+
+test('styleOutline leaves a plain outline untouched when given no options', () => {
+  const outline = outlineFixture();
+  styleOutline(outline, {}, THREE);
+  assert.equal(outline.material.type, 'LineBasicMaterial');
+  assert.equal(outline.material.color.getHexString(), 'ffffff');
+});
+
+test('styleOutline overrides just the color for a solid line', () => {
+  const outline = outlineFixture();
+  styleOutline(outline, { color: '#a1531a' }, THREE);
+  assert.equal(outline.material.type, 'LineBasicMaterial');
+  assert.equal(outline.material.color.getHexString(), 'a1531a');
+});
+
+test('styleOutline switches to a dashed material and computes line distances', () => {
+  const outline = outlineFixture();
+  styleOutline(outline, { dashed: true }, THREE);
+  assert.equal(outline.material.type, 'LineDashedMaterial');
+  // computeLineDistances() populates a 'lineDistance' attribute LineDashedMaterial's shader reads.
+  assert.notEqual(outline.geometry.getAttribute('lineDistance'), undefined);
+});
+
+test('styleOutline dashed keeps the original color when no override is given', () => {
+  const outline = outlineFixture();
+  styleOutline(outline, { dashed: true }, THREE);
+  assert.equal(outline.material.color.getHexString(), 'ffffff');
+});
+
+test('styleOutline dashed applies a color override too', () => {
+  const outline = outlineFixture();
+  styleOutline(outline, { color: '#3b5bab', dashed: true }, THREE);
+  assert.equal(outline.material.color.getHexString(), '3b5bab');
 });

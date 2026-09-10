@@ -77,6 +77,16 @@ export function classifyFeatures(data, config, context = data?.['@context'] || {
         feature,
         source,
         kind: rule.kind,
+        // `group` lets several rules with distinct `kind`s (e.g. one per parcelState value) share
+        // one panel heading / one inline toggle button, while still being individually toggleable
+        // by their own `kind` underneath it. Defaults to the rule's own `kind` — a rule that never
+        // sets `group` is its own group of one, identical to every kind's behaviour before `group`
+        // existed.
+        group: rule.group || rule.kind,
+        // Human-friendly label for this specific kind's sub-heading in the panel (e.g. "Former
+        // Tenure" for a `kind` of "parcel-former-tenure"). Left undefined when unset — the
+        // renderer falls back to its own built-in labels or a humanized kind slug.
+        kindLabel: rule.kindLabel,
         geometry: rule.geometry,
         label: resolveLabel(feature, rule.label),
         style: { ...config?.defaults?.style, ...rule.style },

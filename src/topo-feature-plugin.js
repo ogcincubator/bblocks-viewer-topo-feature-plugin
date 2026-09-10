@@ -61,31 +61,34 @@ const MESH_OPACITY_TRANSPARENT = 0.85;
 const MESH_OPACITY_SURFACE = 0.55;
 const MESH_OPACITY_PARCEL = 0.35;
 
-// Presentation for the plugin's own built-in kinds (see default-config.js) — the only kinds with
-// hand-drawn icons, so the only ones that ever get a compact inline toggle button; every kind
-// actually rendered (including these, plus anything a per-block config's own rules introduce)
-// still gets its own section in the fullscreen per-instance panel — see _refreshFullscreenPanel().
-// A kind with no entry here (only possible via a per-block config's own rule, since the built-in
-// default rule set never produces one) falls back to no inline icon and a humanized version of
-// its own name in the panel — see humanizeKind() below.
-const KIND_PRESENTATION = {
+// Presentation for the plugin's own built-in groups (see default-config.js) — the only ones with
+// hand-drawn icons, so the only ones that ever get a compact inline toggle button. Every group
+// actually rendered (including these, plus anything a per-block config's own rules introduce, via
+// `group`) still gets its own section in the fullscreen per-instance panel — see
+// _refreshFullscreenPanel(). A group with no entry here (only possible via a per-block config,
+// since the built-in default rule set never produces one) falls back to no inline icon and a
+// humanized version of its own name in the panel — see humanizeSlug() below. A rule that doesn't
+// set its own `group` defaults to using its `kind` as the group, which is exactly how every
+// built-in kind below behaves — this table is keyed by group, but for the built-ins group and kind
+// are always the same value.
+const GROUP_PRESENTATION = {
   parcel: { icon: 'parcels', inlineLabel: 'parcels', panelLabel: 'Parcels' },
   surface: { icon: 'surfaces', inlineLabel: 'surfaces', panelLabel: 'Surfaces' },
   solid: { icon: 'solids', inlineLabel: 'solids', panelLabel: 'Solids' },
   face: { panelLabel: 'Faces' },
   ring: { panelLabel: 'Rings' },
 };
-// Inline toggle buttons are offered in this fixed order, for whichever of these three kinds is
+// Inline toggle buttons are offered in this fixed order, for whichever of these three groups is
 // actually present — matches the pre-Stage-2 fixed order exactly.
-const INLINE_ICON_KIND_ORDER = ['parcel', 'surface', 'solid'];
+const INLINE_ICON_GROUP_ORDER = ['parcel', 'surface', 'solid'];
 
-// "former-tenure-parcel" -> "Former tenure parcel" — the panel label for any kind a per-block
-// config's own rules introduce that isn't one of the plugin's built-in kinds above. No attempt at
-// pluralization; a plain humanization is enough for the panel to read as something other than a
-// raw rule-config slug.
-function humanizeKind(kind) {
-  const words = String(kind).replace(/[-_]+/g, ' ').trim();
-  return words ? words.charAt(0).toUpperCase() + words.slice(1) : String(kind);
+// "former-tenure-parcel" -> "Former tenure parcel" — the fallback label for any group or kind a
+// per-block config's own rules introduce, when neither GROUP_PRESENTATION nor a rule's own
+// `kindLabel` supplies one. No attempt at pluralization; a plain humanization is enough for the
+// panel to read as something other than a raw rule-config slug.
+function humanizeSlug(slug) {
+  const words = String(slug).replace(/[-_]+/g, ' ').trim();
+  return words ? words.charAt(0).toUpperCase() + words.slice(1) : String(slug);
 }
 
 const BUTTON_STYLE = 'width: 26px; height: 26px; border: none; border-radius: 4px; cursor: pointer; '
@@ -351,7 +354,7 @@ export default class TopoFeaturePlugin {
         buildFaceGeometry, buildFaceOutline, buildRingGeometry, buildRingOutline,
         buildPolygonGeometry, buildPolygonEdgeLines, buildAllEdgeLines, buildPointMarkers,
         createSolidMesh, createVertexMarkers, getFeatures, getOpenShells, needsTransparency,
-        flattenGeometryZ,
+        flattenGeometryZ, styleOutline,
       },
       { classifyFeatures, resolveFlattenZ },
       { buildDefaultConfig },
@@ -450,8 +453,11 @@ export default class TopoFeaturePlugin {
           flattenGeometryZ(geometry, flattenZ);
           flattenGeometryZ(outline.geometry, flattenZ);
         }
+        // Must run after flattening — a dashed line's phase depends on cumulative distance along
+        // the final (post-flatten) vertex positions.
+        styleOutline(outline, { color: descriptor.style?.lineColor, dashed: descriptor.style?.lineStyle === 'dashed' }, THREE);
         const opacity = descriptor.style?.opacity ?? MESH_OPACITY_OPAQUE;
-        const mesh = createSolidMesh(descriptor.feature, colorIndex++, geometry, opacity, THREE);
+        const mesh = createSolidMesh(descriptor.feature, colorIndex++, geometry, opacity, descriptor.style?.color ?? null, THREE);
         const vertices = createVertexMarkers(geometry, THREE);
         mesh.material.wireframe = this._wireframe;
         scene.add(mesh, outline, vertices);
@@ -460,7 +466,8 @@ export default class TopoFeaturePlugin {
         this._solidVertices.push(vertices);
         const record = {
           mesh, edges: outline, vertices,
-          kind: descriptor.kind, label: descriptor.label, visible: descriptor.initiallyVisible,
+          kind: descriptor.kind, group: descriptor.group, kindLabel: descriptor.kindLabel,
+          label: descriptor.label, visible: descriptor.initiallyVisible,
         };
         this._renderables.push(record);
         this._applyRenderableVisibility(record);
@@ -498,14 +505,14 @@ export default class TopoFeaturePlugin {
     record.vertices.visible = record.visible && this._showVertices;
   }
 
-  _kindAllVisible(kind) {
-    const records = this._renderables.filter(r => r.kind === kind);
+  _groupAllVisible(group) {
+    const records = this._renderables.filter(r => r.group === group);
     return records.length > 0 && records.every(r => r.visible);
   }
 
-  _toggleKind(kind) {
-    const next = !this._kindAllVisible(kind);
-    this._renderables.filter(r => r.kind === kind).forEach(r => {
+  _toggleGroup(group) {
+    const next = !this._groupAllVisible(group);
+    this._renderables.filter(r => r.group === group).forEach(r => {
       r.visible = next;
       this._applyRenderableVisibility(r);
     });
@@ -671,11 +678,11 @@ export default class TopoFeaturePlugin {
       });
     }, () => this._showVertices);
 
-    this._kindToggleButtons = INLINE_ICON_KIND_ORDER
-      .filter(kind => this._renderables.some(r => r.kind === kind))
-      .map(kind => {
-        const { icon, inlineLabel } = KIND_PRESENTATION[kind];
-        return addButton(icon, `Toggle ${inlineLabel}`, () => this._toggleKind(kind), () => this._kindAllVisible(kind));
+    this._kindToggleButtons = INLINE_ICON_GROUP_ORDER
+      .filter(group => this._renderables.some(r => r.group === group))
+      .map(group => {
+        const { icon, inlineLabel } = GROUP_PRESENTATION[group];
+        return addButton(icon, `Toggle ${inlineLabel}`, () => this._toggleGroup(group), () => this._groupAllVisible(group));
       });
 
     addButton('projection', this._projectionTitle(),
@@ -739,16 +746,61 @@ export default class TopoFeaturePlugin {
     this._refreshFullscreenPanel();
   }
 
+  // A checkbox reflecting/controlling the visibility of every renderable in `records` together —
+  // checked when all are visible, unchecked when none are, indeterminate for a mix. Shared between
+  // the panel's group-level heading and (when a group has more than one kind) each kind's own
+  // sub-heading underneath it.
+  _buildSelectAllCheckbox(records) {
+    const allVisible = records.every(r => r.visible);
+    const noneVisible = records.every(r => !r.visible);
+    const checkbox = document.createElement('input');
+    checkbox.type = 'checkbox';
+    checkbox.checked = allVisible;
+    checkbox.indeterminate = !allVisible && !noneVisible;
+    // Harmless (there's nothing to stop propagating to) outside a <summary>, and needed inside
+    // one — prevents the checkbox click from also toggling that <details> open/closed.
+    checkbox.addEventListener('click', e => e.stopPropagation());
+    checkbox.addEventListener('change', () => {
+      records.forEach(r => { r.visible = checkbox.checked; this._applyRenderableVisibility(r); });
+      this._refreshFullscreenPanel();
+    });
+    return checkbox;
+  }
+
+  // One labeled checkbox per record in `records`, appended directly into `container`.
+  _appendFeatureCheckboxes(container, records) {
+    records.forEach(record => {
+      const label = document.createElement('label');
+      label.style.cssText = 'display: block; margin: 2px 0; cursor: pointer;';
+      const checkbox = document.createElement('input');
+      checkbox.type = 'checkbox';
+      checkbox.checked = record.visible;
+      checkbox.addEventListener('change', () => {
+        record.visible = checkbox.checked;
+        this._applyRenderableVisibility(record);
+        this._refreshFullscreenPanel();
+      });
+      label.append(checkbox, document.createTextNode(` ${record.label}`));
+      container.appendChild(label);
+    });
+  }
+
+  // Groups renderables by `group` (one collapsible section + one select-all checkbox each, e.g.
+  // "Parcels"); within a group that contains more than one distinct `kind` (e.g. a per-block
+  // config's own "Created"/"Former Tenure" parcel rules sharing one "parcel" group), each kind
+  // gets its own labeled sub-list with its own select-all checkbox nested underneath. A group
+  // with only one kind (every built-in group, by default) renders exactly as it did before groups
+  // existed — the per-feature checkboxes sit directly under the group heading, no redundant
+  // single-item sub-heading.
   _refreshFullscreenPanel() {
     const panel = this._fullscreenPanelEl;
     if (!panel) return;
     panel.innerHTML = '';
 
-    const kinds = [...new Set(this._renderables.map(r => r.kind))];
-    kinds.forEach(kind => {
-      const records = this._renderables.filter(r => r.kind === kind);
-      const allVisible = records.every(r => r.visible);
-      const noneVisible = records.every(r => !r.visible);
+    const groups = [...new Set(this._renderables.map(r => r.group))];
+    groups.forEach(group => {
+      const groupRecords = this._renderables.filter(r => r.group === group);
+      const kinds = [...new Set(groupRecords.map(r => r.kind))];
 
       const details = document.createElement('details');
       details.open = true;
@@ -756,40 +808,38 @@ export default class TopoFeaturePlugin {
 
       const summary = document.createElement('summary');
       summary.style.cssText = 'cursor: pointer; display: flex; align-items: center; gap: 6px;';
-
-      const groupCheckbox = document.createElement('input');
-      groupCheckbox.type = 'checkbox';
-      groupCheckbox.checked = allVisible;
-      groupCheckbox.indeterminate = !allVisible && !noneVisible;
-      // Prevent the checkbox click from also toggling the <details> open/closed state.
-      groupCheckbox.addEventListener('click', e => e.stopPropagation());
-      groupCheckbox.addEventListener('change', () => {
-        records.forEach(r => { r.visible = groupCheckbox.checked; this._applyRenderableVisibility(r); });
-        this._refreshFullscreenPanel();
-      });
-
-      const panelLabel = KIND_PRESENTATION[kind]?.panelLabel || humanizeKind(kind);
-      summary.append(groupCheckbox, document.createTextNode(`${panelLabel} (${records.length})`));
+      const groupLabel = GROUP_PRESENTATION[group]?.panelLabel || humanizeSlug(group);
+      summary.append(this._buildSelectAllCheckbox(groupRecords), document.createTextNode(`${groupLabel} (${groupRecords.length})`));
       details.appendChild(summary);
 
-      const list = document.createElement('div');
-      list.style.cssText = 'padding-left: 20px; margin-top: 4px;';
-      records.forEach(record => {
-        const label = document.createElement('label');
-        label.style.cssText = 'display: block; margin: 2px 0; cursor: pointer;';
-        const checkbox = document.createElement('input');
-        checkbox.type = 'checkbox';
-        checkbox.checked = record.visible;
-        checkbox.addEventListener('change', () => {
-          record.visible = checkbox.checked;
-          this._applyRenderableVisibility(record);
-          this._refreshFullscreenPanel();
-        });
-        label.append(checkbox, document.createTextNode(` ${record.label}`));
-        list.appendChild(label);
-      });
-      details.appendChild(list);
+      const body = document.createElement('div');
+      body.style.cssText = 'padding-left: 20px; margin-top: 4px;';
 
+      if (kinds.length > 1) {
+        kinds.forEach(kind => {
+          const kindRecords = groupRecords.filter(r => r.kind === kind);
+          const kindLabel = kindRecords[0].kindLabel || GROUP_PRESENTATION[kind]?.panelLabel || humanizeSlug(kind);
+
+          const kindWrapper = document.createElement('div');
+          kindWrapper.style.cssText = 'margin-bottom: 6px;';
+
+          const kindHeader = document.createElement('label');
+          kindHeader.style.cssText = 'display: flex; align-items: center; gap: 6px; font-weight: 600; cursor: pointer;';
+          kindHeader.append(this._buildSelectAllCheckbox(kindRecords), document.createTextNode(`${kindLabel} (${kindRecords.length})`));
+          kindWrapper.appendChild(kindHeader);
+
+          const kindList = document.createElement('div');
+          kindList.style.cssText = 'padding-left: 20px; margin-top: 2px;';
+          this._appendFeatureCheckboxes(kindList, kindRecords);
+          kindWrapper.appendChild(kindList);
+
+          body.appendChild(kindWrapper);
+        });
+      } else {
+        this._appendFeatureCheckboxes(body, groupRecords);
+      }
+
+      details.appendChild(body);
       panel.appendChild(details);
     });
   }
