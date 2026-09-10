@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { getPath, resolveLabel, classifyFeatures } from './rules.js';
+import { getPath, resolveLabel, classifyFeatures, resolveFlattenZ } from './rules.js';
 
 test('getPath resolves a dot-path and returns undefined for a missing segment', () => {
   const obj = { properties: { parcelState: 'wa-parcel-state:created' } };
@@ -129,4 +129,32 @@ test('classifyFeatures normalizes a bare-Feature source entry, not just FeatureC
   const descriptors = classifyFeatures(data, config);
   assert.equal(descriptors.length, 1);
   assert.equal(descriptors[0].feature.id, 'p1');
+});
+
+test('resolveFlattenZ returns 0 for the "flatten" shorthand', () => {
+  assert.equal(resolveFlattenZ('flatten'), 0);
+});
+
+test('resolveFlattenZ returns the configured datum for { flattenTo }', () => {
+  assert.equal(resolveFlattenZ({ flattenTo: 12.5 }), 12.5);
+  assert.equal(resolveFlattenZ({ flattenTo: 0 }), 0);
+});
+
+test('resolveFlattenZ returns null for "preserve", the every-rule default', () => {
+  assert.equal(resolveFlattenZ('preserve'), null);
+});
+
+test('resolveFlattenZ returns null for anything unrecognised, rather than guessing', () => {
+  assert.equal(resolveFlattenZ(undefined), null);
+  assert.equal(resolveFlattenZ(null), null);
+  assert.equal(resolveFlattenZ('something-else'), null);
+  assert.equal(resolveFlattenZ({ flattenTo: 'not-a-number' }), null);
+  assert.equal(resolveFlattenZ({}), null);
+});
+
+test('classifyFeatures elevation flows through to the descriptor unchanged, for resolveFlattenZ to interpret', () => {
+  const data = { parcels: [{ id: 'p1', properties: {} }] };
+  const flattenRule = { source: 'parcels', kind: 'parcel', elevation: { flattenTo: 3 } };
+  const [descriptor] = classifyFeatures(data, { rules: [flattenRule] });
+  assert.equal(resolveFlattenZ(descriptor.elevation), 3);
 });

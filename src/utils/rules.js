@@ -88,3 +88,16 @@ export function classifyFeatures(data, config, context = data?.['@context'] || {
 
   return descriptors;
 }
+
+// Interprets a descriptor's `elevation` value into a concrete Z to flatten a feature's geometry
+// to, or null if its original Z should be left alone. Two shapes are recognised: the string
+// 'flatten' (Z=0), and `{ flattenTo: <number> }` for a specific datum other than zero. Anything
+// else — including 'preserve', the default every rule gets when it doesn't set its own `elevation`
+// — means "leave Z alone," so this returns null for it rather than guessing.
+export function resolveFlattenZ(elevation) {
+  if (elevation === 'flatten') return 0;
+  if (elevation && typeof elevation === 'object' && typeof elevation.flattenTo === 'number') {
+    return elevation.flattenTo;
+  }
+  return null;
+}

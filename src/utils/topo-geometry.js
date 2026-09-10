@@ -521,3 +521,21 @@ export function buildAllEdgeLines(edgeMap, pointMap, THREE) {
   );
   return lineSegmentsFromPositions(positions, THREE);
 }
+
+// ─── Elevation ──────────────────────────────────────────────────────────────────
+//
+// Sets every vertex's Z coordinate to `z`, in place — a rule's `elevation: "flatten"` (or
+// `{ flattenTo }`), applied post-build so it works uniformly across every geometry strategy
+// (solid/open-shell/polygon/face/ring) without any of them needing to know about it. Operates
+// directly on an already-built BufferGeometry's own attributes/methods, so — unlike every other
+// function in this module — it needs no THREE parameter: nothing new is constructed. Safe to call
+// on both a mesh's geometry (has a `normal` attribute, recomputed since flattening changes it) and
+// an outline's geometry (no `normal` attribute — recomputing normals is skipped, not attempted).
+export function flattenGeometryZ(geometry, z) {
+  const position = geometry.getAttribute(POSITION_ATTRIBUTE);
+  for (let i = 0; i < position.count; i++) position.setZ(i, z);
+  position.needsUpdate = true;
+  if (geometry.getAttribute(NORMAL_ATTRIBUTE)) geometry.computeVertexNormals();
+  geometry.computeBoundingBox();
+  geometry.computeBoundingSphere();
+}

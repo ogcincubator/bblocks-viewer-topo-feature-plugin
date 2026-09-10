@@ -351,8 +351,9 @@ export default class TopoFeaturePlugin {
         buildFaceGeometry, buildFaceOutline, buildRingGeometry, buildRingOutline,
         buildPolygonGeometry, buildPolygonEdgeLines, buildAllEdgeLines, buildPointMarkers,
         createSolidMesh, createVertexMarkers, getFeatures, getOpenShells, needsTransparency,
+        flattenGeometryZ,
       },
-      { classifyFeatures },
+      { classifyFeatures, resolveFlattenZ },
       { buildDefaultConfig },
       { loadViewerConfig },
     ] = await Promise.all([
@@ -437,6 +438,18 @@ export default class TopoFeaturePlugin {
         const geometry = strategy.build(descriptor.feature);
         if (!geometry) return;
         const outline = strategy.outline(descriptor.feature);
+        // Flattening (a rule's elevation: "flatten" or { flattenTo }) is a post-build geometric
+        // operation, applied identically regardless of which strategy produced the geometry —
+        // the mesh and its outline are built independently (the outline re-derives its own line
+        // segments from the point map rather than reading them off `geometry`), so both need
+        // flattening for the two to still line up. createVertexMarkers below reads its positions
+        // directly off `geometry`, so flattening it first is enough for markers to come out
+        // flattened too, with no separate handling.
+        const flattenZ = resolveFlattenZ(descriptor.elevation);
+        if (flattenZ !== null) {
+          flattenGeometryZ(geometry, flattenZ);
+          flattenGeometryZ(outline.geometry, flattenZ);
+        }
         const opacity = descriptor.style?.opacity ?? MESH_OPACITY_OPAQUE;
         const mesh = createSolidMesh(descriptor.feature, colorIndex++, geometry, opacity, THREE);
         const vertices = createVertexMarkers(geometry, THREE);
