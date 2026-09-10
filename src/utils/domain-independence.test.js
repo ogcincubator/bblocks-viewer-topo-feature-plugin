@@ -52,7 +52,7 @@ async function resolveEffectiveConfig() {
 
 test('classifyFeatures distinguishes all four pipes by literal, CURIE, and full-URI values', async () => {
   const { maps, openShells, config } = await resolveEffectiveConfig();
-  const descriptors = classifyFeatures({ ...data, __openShells: openShells }, config);
+  const descriptors = classifyFeatures({ ...data, surfaces: openShells }, config);
   const byId = Object.fromEntries(descriptors.map(d => [d.feature.id, d]));
 
   assert.equal(descriptors.length, 4, 'every pipe should be classified — none left unmatched');
@@ -78,7 +78,7 @@ test('classifyFeatures distinguishes all four pipes by literal, CURIE, and full-
 
 test('real geometry builds correctly for every pipe, and the flatten rule actually flattens it', async () => {
   const { maps, openShells, config } = await resolveEffectiveConfig();
-  const descriptors = classifyFeatures({ ...data, __openShells: openShells }, config);
+  const descriptors = classifyFeatures({ ...data, surfaces: openShells }, config);
   const byId = Object.fromEntries(descriptors.map(d => [d.feature.id, d]));
 
   for (const descriptor of descriptors) {

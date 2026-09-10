@@ -27,7 +27,7 @@ export function buildDefaultConfig(counts, opacities) {
     if (solidCount > 0) {
       rules.push({ source: 'solids', kind: 'solid', geometry: 'solid', label: DEFAULT_LABEL, style: { opacity: opacities.solid } });
     }
-    rules.push({ source: '__openShells', kind: 'surface', geometry: 'open-shell', label: DEFAULT_LABEL, style: { opacity: opacities.surface } });
+    rules.push({ source: 'surfaces', kind: 'surface', geometry: 'open-shell', label: DEFAULT_LABEL, style: { opacity: opacities.surface } });
     rules.push({ source: 'parcels', kind: 'parcel', geometry: 'polygon', label: DEFAULT_LABEL, style: { opacity: opacities.parcel } });
   } else if (faceCount > 0) {
     rules.push({ source: 'faces', kind: 'face', geometry: 'face', label: DEFAULT_LABEL, style: { opacity: opacities.face } });

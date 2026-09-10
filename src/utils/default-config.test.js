@@ -9,7 +9,7 @@ test('a document with solids, open shells and parcels gets all three primary-tie
     { solidCount: 2, openShellCount: 1, parcelCount: 3, faceCount: 0, ringCount: 0 },
     OPACITIES
   );
-  assert.deepEqual(rules.map(r => r.source), ['solids', '__openShells', 'parcels']);
+  assert.deepEqual(rules.map(r => r.source), ['solids', 'surfaces', 'parcels']);
   assert.deepEqual(rules.map(r => r.kind), ['solid', 'surface', 'parcel']);
   assert.equal(rules[0].style.opacity, OPACITIES.solid);
   assert.equal(rules[1].style.opacity, OPACITIES.surface);
@@ -23,7 +23,7 @@ test('parcels alone still trigger the primary tier, with a surface rule included
   );
   // No 'solid' rule (solidCount is 0), but 'surface' is still present — matching the original's
   // unconditional openShells.forEach, which is simply a no-op when there are none.
-  assert.deepEqual(rules.map(r => r.source), ['__openShells', 'parcels']);
+  assert.deepEqual(rules.map(r => r.source), ['surfaces', 'parcels']);
 });
 
 test('open shells alone (no solids, no parcels) still trigger the primary tier', () => {
@@ -33,7 +33,7 @@ test('open shells alone (no solids, no parcels) still trigger the primary tier',
   );
   // Primary tier wins over faces/rings even though faces/rings are also present, matching the
   // original's `if (hasPrimaryTier) { ...; return; }` short-circuit.
-  assert.deepEqual(rules.map(r => r.source), ['__openShells', 'parcels']);
+  assert.deepEqual(rules.map(r => r.source), ['surfaces', 'parcels']);
 });
 
 test('faces render only when the primary tier is entirely absent', () => {

@@ -371,10 +371,13 @@ export default class TopoFeaturePlugin {
     const opaqueOrTransparent = needsTransparency(data) ? MESH_OPACITY_TRANSPARENT : MESH_OPACITY_OPAQUE;
 
     // The plugin's own built-in default rule set, reproducing the pre-rule-engine tiering exactly
-    // (see default-config.js). `__openShells` is a synthetic source: open shells aren't a plain
-    // top-level document array like `solids`/`parcels`, they're derived from the solid/shell
-    // reference graph, so that derivation still happens here rather than inside the (otherwise
-    // document-shape-agnostic) rule engine.
+    // (see default-config.js). `surfaces` is a synthetic, reserved source name: open shells aren't
+    // a plain top-level document array like `solids`/`parcels`, they're derived from the
+    // solid/shell reference graph, so that derivation still happens here rather than inside the
+    // (otherwise document-shape-agnostic) rule engine — see the README's "Rendering rules"
+    // section. Because it's injected via object spread + explicit override below, a document that
+    // happens to define its own top-level `surfaces` array (not part of the base topo-feature
+    // spec, but not reserved by it either) would have that array shadowed by this derived list.
     const defaultConfig = buildDefaultConfig(
       {
         solidCount: getFeatures(data.solids || []).length,
@@ -399,7 +402,7 @@ export default class TopoFeaturePlugin {
     this._config = await loadViewerConfig(this._context, defaultConfig);
 
     if (this._config.rules.length) {
-      const descriptors = classifyFeatures({ ...data, __openShells: openShells }, this._config);
+      const descriptors = classifyFeatures({ ...data, surfaces: openShells }, this._config);
 
       // One entry per `geometry` strategy a rule can name — each wraps the matching pair of
       // build*/build*EdgeLines (or build*Outline) functions from topo-geometry.js behind a

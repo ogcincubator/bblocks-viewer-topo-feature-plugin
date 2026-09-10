@@ -39,7 +39,14 @@ what a "parcel" is, or what `wa-parcel-state:former-tenure` means. Instead, ever
 through an ordered list of **rules**, each naming:
 
 - `source` — a top-level document key to classify features from (`solids`, `parcels`, or anything
-  else a profile's schema defines — the plugin never hard-codes which keys exist)
+  else a profile's schema defines — the plugin never hard-codes which keys exist), with one
+  reserved exception: **`surfaces`** always refers to open shells — surfaces not already drawn as
+  part of a solid (see `getOpenShells`). These aren't a plain top-level document array like
+  `solids`/`parcels`; they're derived from the solid/shell reference graph, so the plugin computes
+  them itself and makes them available under this name for any rule to target. A document that
+  happens to define its own top-level `surfaces` array (not part of the base topo-feature spec, but
+  not reserved by it either) would have that array shadowed by this derived list — avoid the name
+  for anything else in a profile's schema.
 - `geometry` — which geometry-building strategy to use (`solid`, `open-shell`, `polygon`, `face`,
   `ring`)
 - `match` *(optional)* — a `property` (dot-path from the feature root, e.g.

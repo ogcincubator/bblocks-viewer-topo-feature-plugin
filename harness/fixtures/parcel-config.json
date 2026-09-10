@@ -86,7 +86,7 @@
       }
     },
     {
-      "source": "__openShells",
+      "source": "surfaces",
       "geometry": "open-shell",
       "match": {
         "property": "properties.description",
