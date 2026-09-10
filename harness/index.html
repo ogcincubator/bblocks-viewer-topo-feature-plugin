@@ -23,6 +23,13 @@
     <label>File: <input type="file" id="fileInput" accept="application/json,.json,.geojson" /></label>
     <label>URL: <input type="text" id="urlInput" placeholder="https://.../example.json" size="42" /></label>
     <button id="urlLoad" type="button">Load</button>
+    <span style="color:#666">|</span>
+    <label title="Pairs the currently-loaded document with a rule config, exactly as a bblock.json resources entry would deliver one via context.bblock — see resolve-config.js.">
+      Config file: <input type="file" id="configFileInput" accept="application/json,.json" />
+    </label>
+    <label>Config URL: <input type="text" id="configUrlInput" placeholder="https://.../viewer-config.json" size="34" /></label>
+    <button id="configUrlLoad" type="button">Load</button>
+    <button id="configClear" type="button">Clear config</button>
     <span id="status"></span>
   </div>
   <div id="host"></div>
