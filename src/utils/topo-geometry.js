@@ -457,10 +457,13 @@ export function buildPolygonEdgeLines(polygon, edgeMap, pointMap, THREE) {
 
 // Used for any filled mesh (a Solid, an open Shell surface, a Polygon parcel, or a standalone
 // Face/Ring rendered on its own) — only the index (for color cycling) and an optional name/id for
-// userData are solid-specific in name only.
-export function createSolidMesh(feature, index, geometry, opacity = 1.0, THREE) {
+// userData are solid-specific in name only. `color` (a rule's own style.color, e.g. "#a1531a" or
+// a 0xRRGGBB number — THREE.Color.set() accepts either) overrides the cycling palette for this one
+// mesh when given; omitted/null falls back to SOLID_COLORS[index % ...] exactly as before a rule
+// could specify its own color at all.
+export function createSolidMesh(feature, index, geometry, opacity = 1.0, color = null, THREE) {
   const mesh = new THREE.Mesh(geometry, new THREE.MeshPhongMaterial({
-    color: SOLID_COLORS[index % SOLID_COLORS.length],
+    color: color ?? SOLID_COLORS[index % SOLID_COLORS.length],
     side: THREE.DoubleSide,
     shininess: MESH_SHININESS,
     transparent: opacity < 1.0,
@@ -520,4 +523,52 @@ export function buildAllEdgeLines(edgeMap, pointMap, THREE) {
     (pointMap[startId] && pointMap[endId]) ? [...pointMap[startId], ...pointMap[endId]] : []
   );
   return lineSegmentsFromPositions(positions, THREE);
+}
+
+// ─── Elevation ──────────────────────────────────────────────────────────────────
+//
+// Sets every vertex's Z coordinate to `z`, in place — a rule's `elevation: "flatten"` (or
+// `{ flattenTo }`), applied post-build so it works uniformly across every geometry strategy
+// (solid/open-shell/polygon/face/ring) without any of them needing to know about it. Operates
+// directly on an already-built BufferGeometry's own attributes/methods, so — unlike every other
+// function in this module — it needs no THREE parameter: nothing new is constructed. Safe to call
+// on both a mesh's geometry (has a `normal` attribute, recomputed since flattening changes it) and
+// an outline's geometry (no `normal` attribute — recomputing normals is skipped, not attempted).
+export function flattenGeometryZ(geometry, z) {
+  const position = geometry.getAttribute(POSITION_ATTRIBUTE);
+  for (let i = 0; i < position.count; i++) position.setZ(i, z);
+  position.needsUpdate = true;
+  if (geometry.getAttribute(NORMAL_ATTRIBUTE)) geometry.computeVertexNormals();
+  geometry.computeBoundingBox();
+  geometry.computeBoundingSphere();
+}
+
+// ─── Outline styling ────────────────────────────────────────────────────────────
+//
+// Fixed dash scale — not yet exposed as a per-rule setting. Same world units as the document's own
+// coordinates, so how many dashes an edge shows varies with a document's scale (a WA parcel edge
+// spanning tens of metres vs. a small synthetic fixture spanning single-digit units); a reasonable
+// default rather than a tuned one.
+const OUTLINE_DASH_SIZE = 0.5;
+const OUTLINE_GAP_SIZE = 0.3;
+
+// Applies a rule's optional line styling to an already-built outline (a LineSegments from one of
+// the build*EdgeLines/build*Outline functions above) — a solid color override, and/or swapping to
+// a dashed line. Every geometry strategy's outline is a plain LineSegments with a `material` and
+// `geometry`, so this is applied uniformly regardless of which one built it, exactly like
+// createSolidMesh's `color` override is for the fill. Called *after* any elevation flattening: a
+// dashed line's phase depends on cumulative distance along the final vertex positions
+// (computeLineDistances() must see post-flatten coordinates, not the original ones). A no-op
+// options object leaves the outline's default solid white material untouched.
+export function styleOutline(outline, { color, dashed } = {}, THREE) {
+  if (dashed) {
+    outline.material = new THREE.LineDashedMaterial({
+      color: color ?? outline.material.color,
+      dashSize: OUTLINE_DASH_SIZE,
+      gapSize: OUTLINE_GAP_SIZE,
+    });
+    outline.computeLineDistances();
+  } else if (color) {
+    outline.material.color.set(color);
+  }
 }

@@ -61,16 +61,35 @@ const MESH_OPACITY_TRANSPARENT = 0.85;
 const MESH_OPACITY_SURFACE = 0.55;
 const MESH_OPACITY_PARCEL = 0.35;
 
-// Kinds that get a dedicated inline toggle icon (only when present) and their inline label. Every
-// kind actually rendered (including the legacy face/ring fallback tiers, which have no inline
-// icon) still gets its own section in the fullscreen per-instance panel — see
-// _refreshFullscreenPanel().
-const INLINE_KIND_TOGGLES = [
-  { kind: 'parcel', icon: 'parcels', label: 'parcels' },
-  { kind: 'surface', icon: 'surfaces', label: 'surfaces' },
-  { kind: 'solid', icon: 'solids', label: 'solids' },
-];
-const KIND_PANEL_LABELS = { parcel: 'Parcels', surface: 'Surfaces', solid: 'Solids', face: 'Faces', ring: 'Rings' };
+// Presentation for the plugin's own built-in groups (see default-config.js) — the only ones with
+// hand-drawn icons, so the only ones that ever get a compact inline toggle button. Every group
+// actually rendered (including these, plus anything a per-block config's own rules introduce, via
+// `group`) still gets its own section in the fullscreen per-instance panel — see
+// _refreshFullscreenPanel(). A group with no entry here (only possible via a per-block config,
+// since the built-in default rule set never produces one) falls back to no inline icon and a
+// humanized version of its own name in the panel — see humanizeSlug() below. A rule that doesn't
+// set its own `group` defaults to using its `kind` as the group, which is exactly how every
+// built-in kind below behaves — this table is keyed by group, but for the built-ins group and kind
+// are always the same value.
+const GROUP_PRESENTATION = {
+  parcel: { icon: 'parcels', inlineLabel: 'parcels', panelLabel: 'Parcels' },
+  surface: { icon: 'surfaces', inlineLabel: 'surfaces', panelLabel: 'Surfaces' },
+  solid: { icon: 'solids', inlineLabel: 'solids', panelLabel: 'Solids' },
+  face: { panelLabel: 'Faces' },
+  ring: { panelLabel: 'Rings' },
+};
+// Inline toggle buttons are offered in this fixed order, for whichever of these three groups is
+// actually present — matches the pre-Stage-2 fixed order exactly.
+const INLINE_ICON_GROUP_ORDER = ['parcel', 'surface', 'solid'];
+
+// "former-tenure-parcel" -> "Former tenure parcel" — the fallback label for any group or kind a
+// per-block config's own rules introduce, when neither GROUP_PRESENTATION nor a rule's own
+// `kindLabel` supplies one. No attempt at pluralization; a plain humanization is enough for the
+// panel to read as something other than a raw rule-config slug.
+function humanizeSlug(slug) {
+  const words = String(slug).replace(/[-_]+/g, ' ').trim();
+  return words ? words.charAt(0).toUpperCase() + words.slice(1) : String(slug);
+}
 
 const BUTTON_STYLE = 'width: 26px; height: 26px; border: none; border-radius: 4px; cursor: pointer; '
   + 'display: flex; align-items: center; justify-content: center; padding: 0; '
@@ -146,6 +165,10 @@ export default class TopoFeaturePlugin {
     // toggle icons and the fullscreen per-type/per-instance panel from one shared visibility
     // state. Bare edge/point "soup" tiers (no discrete named objects) aren't recorded here.
     this._renderables = [];
+    // The effective rule config for the current render — the plugin's own built-in defaults
+    // (default-config.js), merged with a per-block override if context.bblock declares one (see
+    // resolve-config.js). Resolved fresh in _buildScene(); null until then.
+    this._config = null;
     this._initialCameraPosition = null;
     this._initialCameraTarget = null;
     this._initialCameraZoom = 1;
@@ -325,87 +348,142 @@ export default class TopoFeaturePlugin {
   // or Ring ("simple polygon"), bare Edges, or bare Points — matching how leaner topo-feature
   // examples (not solids/parcels at all) are actually authored.
   async _buildScene(scene, THREE, data) {
-    const {
-      buildMaps, buildSolidGeometry, buildSolidEdgeLines, buildShellGeometry, buildShellEdgeLines,
-      buildFaceGeometry, buildFaceOutline, buildRingGeometry, buildRingOutline,
-      buildPolygonGeometry, buildPolygonEdgeLines, buildAllEdgeLines, buildPointMarkers,
-      createSolidMesh, createVertexMarkers, getFeatures, getOpenShells, needsTransparency,
-    } = await import('./utils/topo-geometry.js');
+    const [
+      {
+        buildMaps, buildSolidGeometry, buildSolidEdgeLines, buildShellGeometry, buildShellEdgeLines,
+        buildFaceGeometry, buildFaceOutline, buildRingGeometry, buildRingOutline,
+        buildPolygonGeometry, buildPolygonEdgeLines, buildAllEdgeLines, buildPointMarkers,
+        createSolidMesh, createVertexMarkers, getFeatures, getOpenShells, needsTransparency,
+        flattenGeometryZ, styleOutline,
+      },
+      { classifyFeatures, resolveFlattenZ },
+      { buildDefaultConfig },
+      { loadViewerConfig },
+    ] = await Promise.all([
+      import('./utils/topo-geometry.js'),
+      import('./utils/rules.js'),
+      import('./utils/default-config.js'),
+      import('./utils/resolve-config.js'),
+    ]);
 
     const maps = buildMaps(data);
-    const solids = getFeatures(data.solids || []);
     const openShells = getOpenShells(data, maps);
-    const parcels = getFeatures(data.parcels || []);
-    const faces = getFeatures(data.faces || []);
-    const rings = getFeatures(data.rings || []);
-    const hasEdges = Object.keys(maps.edgeMap).length > 0;
-    const hasPoints = Object.keys(maps.pointMap).length > 0;
+    const opaqueOrTransparent = needsTransparency(data) ? MESH_OPACITY_TRANSPARENT : MESH_OPACITY_OPAQUE;
 
-    let colorIndex = 0;
-    const addMesh = (feature, geometry, outline, opacity, kind) => {
-      const mesh = createSolidMesh(feature, colorIndex++, geometry, opacity, THREE);
-      const vertices = createVertexMarkers(geometry, THREE);
-      mesh.material.wireframe = this._wireframe;
-      scene.add(mesh, outline, vertices);
-      this._solidMeshes.push(mesh);
-      this._solidEdges.push(outline);
-      this._solidVertices.push(vertices);
-      const label = feature.properties?.appellation?.label
-        || feature.properties?.appellation
-        || feature.properties?.description
-        || feature.properties?.name
-        || feature.id;
-      const record = { mesh, edges: outline, vertices, kind, label: String(label), visible: true };
-      this._renderables.push(record);
-      this._applyRenderableVisibility(record);
-    };
-
-    const hasPrimaryTier = solids.length > 0 || openShells.length > 0 || parcels.length > 0;
-
-    if (hasPrimaryTier) {
-      if (solids.length) {
-        const opacity = needsTransparency(data) ? MESH_OPACITY_TRANSPARENT : MESH_OPACITY_OPAQUE;
-        solids.forEach(solid => {
-          const { geometry } = buildSolidGeometry(solid, maps.shellMap, maps.faceMap, maps.ringMap, maps.edgeMap, maps.pointMap, THREE);
-          const outline = buildSolidEdgeLines(solid, maps.shellMap, maps.faceMap, maps.ringMap, maps.edgeMap, maps.pointMap, THREE);
-          addMesh(solid, geometry, outline, opacity, 'solid');
-        });
+    // The plugin's own built-in default rule set, reproducing the pre-rule-engine tiering exactly
+    // (see default-config.js). `surfaces` is a synthetic, reserved source name: open shells aren't
+    // a plain top-level document array like `solids`/`parcels`, they're derived from the
+    // solid/shell reference graph, so that derivation still happens here rather than inside the
+    // (otherwise document-shape-agnostic) rule engine — see the README's "Rendering rules"
+    // section. Because it's injected via object spread + explicit override below, a document that
+    // happens to define its own top-level `surfaces` array (not part of the base topo-feature
+    // spec, but not reserved by it either) would have that array shadowed by this derived list.
+    const defaultConfig = buildDefaultConfig(
+      {
+        solidCount: getFeatures(data.solids || []).length,
+        openShellCount: openShells.length,
+        parcelCount: getFeatures(data.parcels || []).length,
+        faceCount: getFeatures(data.faces || []).length,
+        ringCount: getFeatures(data.rings || []).length,
+      },
+      {
+        solid: opaqueOrTransparent,
+        surface: MESH_OPACITY_SURFACE,
+        parcel: MESH_OPACITY_PARCEL,
+        face: opaqueOrTransparent,
+        ring: MESH_OPACITY_OPAQUE,
       }
-      openShells.forEach(shell => {
-        const { geometry, faceCount } = buildShellGeometry(shell, maps.shellMap, maps.faceMap, maps.ringMap, maps.edgeMap, maps.pointMap, THREE);
-        if (!faceCount) return;
-        const outline = buildShellEdgeLines(shell, maps.shellMap, maps.faceMap, maps.ringMap, maps.edgeMap, maps.pointMap, THREE);
-        addMesh(shell, geometry, outline, MESH_OPACITY_SURFACE, 'surface');
-      });
-      parcels.forEach(parcel => {
-        const geometry = buildPolygonGeometry(parcel, maps.edgeMap, maps.pointMap, THREE);
+    );
+
+    // A per-block config (declared as a bblock.json `resources` entry, see resolve-config.js) is
+    // merged over these defaults if the host gave us a context.bblock that declares one; falls
+    // straight back to defaultConfig — unchanged — for every existing example, the harness
+    // (context.bblock is never supplied there), and any fetch/parse failure.
+    this._config = await loadViewerConfig(this._context, defaultConfig);
+
+    if (this._config.rules.length) {
+      const descriptors = classifyFeatures({ ...data, surfaces: openShells }, this._config);
+
+      // One entry per `geometry` strategy a rule can name — each wraps the matching pair of
+      // build*/build*EdgeLines (or build*Outline) functions from topo-geometry.js behind a
+      // uniform (feature) -> geometry|null, (feature) -> outline signature so the render loop
+      // below doesn't need to know which kind it's looking at.
+      const geometryStrategies = {
+        solid: {
+          build: f => buildSolidGeometry(f, maps.shellMap, maps.faceMap, maps.ringMap, maps.edgeMap, maps.pointMap, THREE).geometry,
+          outline: f => buildSolidEdgeLines(f, maps.shellMap, maps.faceMap, maps.ringMap, maps.edgeMap, maps.pointMap, THREE),
+        },
+        'open-shell': {
+          // Matches the pre-rule-engine `if (!faceCount) return;` guard: an open shell with zero
+          // resolvable faces contributes no mesh, even though buildShellGeometry always returns a
+          // (possibly empty) geometry object rather than null on its own.
+          build: f => {
+            const { geometry, faceCount } = buildShellGeometry(f, maps.shellMap, maps.faceMap, maps.ringMap, maps.edgeMap, maps.pointMap, THREE);
+            return faceCount ? geometry : null;
+          },
+          outline: f => buildShellEdgeLines(f, maps.shellMap, maps.faceMap, maps.ringMap, maps.edgeMap, maps.pointMap, THREE),
+        },
+        polygon: {
+          build: f => buildPolygonGeometry(f, maps.edgeMap, maps.pointMap, THREE),
+          outline: f => buildPolygonEdgeLines(f, maps.edgeMap, maps.pointMap, THREE),
+        },
+        face: {
+          build: f => buildFaceGeometry(f, maps.ringMap, maps.edgeMap, maps.pointMap, THREE),
+          outline: f => buildFaceOutline(f, maps.ringMap, maps.edgeMap, maps.pointMap, THREE),
+        },
+        ring: {
+          build: f => buildRingGeometry(f, maps.edgeMap, maps.pointMap, THREE),
+          outline: f => buildRingOutline(f, maps.edgeMap, maps.pointMap, THREE),
+        },
+      };
+
+      let colorIndex = 0;
+      descriptors.forEach(descriptor => {
+        const strategy = geometryStrategies[descriptor.geometry];
+        if (!strategy) return;
+        const geometry = strategy.build(descriptor.feature);
         if (!geometry) return;
-        const outline = buildPolygonEdgeLines(parcel, maps.edgeMap, maps.pointMap, THREE);
-        addMesh(parcel, geometry, outline, MESH_OPACITY_PARCEL, 'parcel');
+        const outline = strategy.outline(descriptor.feature);
+        // Flattening (a rule's elevation: "flatten" or { flattenTo }) is a post-build geometric
+        // operation, applied identically regardless of which strategy produced the geometry —
+        // the mesh and its outline are built independently (the outline re-derives its own line
+        // segments from the point map rather than reading them off `geometry`), so both need
+        // flattening for the two to still line up. createVertexMarkers below reads its positions
+        // directly off `geometry`, so flattening it first is enough for markers to come out
+        // flattened too, with no separate handling.
+        const flattenZ = resolveFlattenZ(descriptor.elevation);
+        if (flattenZ !== null) {
+          flattenGeometryZ(geometry, flattenZ);
+          flattenGeometryZ(outline.geometry, flattenZ);
+        }
+        // Must run after flattening — a dashed line's phase depends on cumulative distance along
+        // the final (post-flatten) vertex positions.
+        styleOutline(outline, { color: descriptor.style?.lineColor, dashed: descriptor.style?.lineStyle === 'dashed' }, THREE);
+        const opacity = descriptor.style?.opacity ?? MESH_OPACITY_OPAQUE;
+        const mesh = createSolidMesh(descriptor.feature, colorIndex++, geometry, opacity, descriptor.style?.color ?? null, THREE);
+        const vertices = createVertexMarkers(geometry, THREE);
+        mesh.material.wireframe = this._wireframe;
+        scene.add(mesh, outline, vertices);
+        this._solidMeshes.push(mesh);
+        this._solidEdges.push(outline);
+        this._solidVertices.push(vertices);
+        const record = {
+          mesh, edges: outline, vertices,
+          kind: descriptor.kind, group: descriptor.group, kindLabel: descriptor.kindLabel,
+          label: descriptor.label, visible: descriptor.initiallyVisible,
+        };
+        this._renderables.push(record);
+        this._applyRenderableVisibility(record);
       });
       return;
     }
 
-    if (faces.length) {
-      // Simple-polygon case: one or more Faces with no owning Shell/Solid.
-      const opacity = needsTransparency(data) ? MESH_OPACITY_TRANSPARENT : MESH_OPACITY_OPAQUE;
-      faces.forEach(face => {
-        const geometry = buildFaceGeometry(face, maps.ringMap, maps.edgeMap, maps.pointMap, THREE);
-        if (!geometry) return;
-        const outline = buildFaceOutline(face, maps.ringMap, maps.edgeMap, maps.pointMap, THREE);
-        addMesh(face, geometry, outline, opacity, 'face');
-      });
-    } else if (rings.length) {
-      // Flattest simple-polygon case: bare Rings with no owning Face at all.
-      rings.forEach(ring => {
-        const geometry = buildRingGeometry(ring, maps.edgeMap, maps.pointMap, THREE);
-        if (!geometry) return;
-        const outline = buildRingOutline(ring, maps.edgeMap, maps.pointMap, THREE);
-        addMesh(ring, geometry, outline, MESH_OPACITY_OPAQUE, 'ring');
-      });
-    } else if (hasEdges) {
+    const hasEdges = Object.keys(maps.edgeMap).length > 0;
+    const hasPoints = Object.keys(maps.pointMap).length > 0;
+    if (hasEdges) {
       // Bare edges: no fill, so the edges toggle (on by default) already shows something; vertices
       // still default off, so turn them on too or points-with-no-edges-drawn-through-them vanish.
+      // No per-feature kind/label to classify here, so this stays outside the rule engine.
       this._showVertices = true;
       const edges = buildAllEdgeLines(maps.edgeMap, maps.pointMap, THREE);
       const vertices = buildPointMarkers(maps.pointMap, THREE);
@@ -430,14 +508,14 @@ export default class TopoFeaturePlugin {
     record.vertices.visible = record.visible && this._showVertices;
   }
 
-  _kindAllVisible(kind) {
-    const records = this._renderables.filter(r => r.kind === kind);
+  _groupAllVisible(group) {
+    const records = this._renderables.filter(r => r.group === group);
     return records.length > 0 && records.every(r => r.visible);
   }
 
-  _toggleKind(kind) {
-    const next = !this._kindAllVisible(kind);
-    this._renderables.filter(r => r.kind === kind).forEach(r => {
+  _toggleGroup(group) {
+    const next = !this._groupAllVisible(group);
+    this._renderables.filter(r => r.group === group).forEach(r => {
       r.visible = next;
       this._applyRenderableVisibility(r);
     });
@@ -603,11 +681,12 @@ export default class TopoFeaturePlugin {
       });
     }, () => this._showVertices);
 
-    this._kindToggleButtons = INLINE_KIND_TOGGLES
-      .filter(({ kind }) => this._renderables.some(r => r.kind === kind))
-      .map(({ kind, icon, label }) =>
-        addButton(icon, `Toggle ${label}`, () => this._toggleKind(kind), () => this._kindAllVisible(kind))
-      );
+    this._kindToggleButtons = INLINE_ICON_GROUP_ORDER
+      .filter(group => this._renderables.some(r => r.group === group))
+      .map(group => {
+        const { icon, inlineLabel } = GROUP_PRESENTATION[group];
+        return addButton(icon, `Toggle ${inlineLabel}`, () => this._toggleGroup(group), () => this._groupAllVisible(group));
+      });
 
     addButton('projection', this._projectionTitle(),
       () => this._setProjection(this._projection === PROJECTION_PERSPECTIVE ? PROJECTION_ORTHOGRAPHIC : PROJECTION_PERSPECTIVE),
@@ -670,16 +749,61 @@ export default class TopoFeaturePlugin {
     this._refreshFullscreenPanel();
   }
 
+  // A checkbox reflecting/controlling the visibility of every renderable in `records` together —
+  // checked when all are visible, unchecked when none are, indeterminate for a mix. Shared between
+  // the panel's group-level heading and (when a group has more than one kind) each kind's own
+  // sub-heading underneath it.
+  _buildSelectAllCheckbox(records) {
+    const allVisible = records.every(r => r.visible);
+    const noneVisible = records.every(r => !r.visible);
+    const checkbox = document.createElement('input');
+    checkbox.type = 'checkbox';
+    checkbox.checked = allVisible;
+    checkbox.indeterminate = !allVisible && !noneVisible;
+    // Harmless (there's nothing to stop propagating to) outside a <summary>, and needed inside
+    // one — prevents the checkbox click from also toggling that <details> open/closed.
+    checkbox.addEventListener('click', e => e.stopPropagation());
+    checkbox.addEventListener('change', () => {
+      records.forEach(r => { r.visible = checkbox.checked; this._applyRenderableVisibility(r); });
+      this._refreshFullscreenPanel();
+    });
+    return checkbox;
+  }
+
+  // One labeled checkbox per record in `records`, appended directly into `container`.
+  _appendFeatureCheckboxes(container, records) {
+    records.forEach(record => {
+      const label = document.createElement('label');
+      label.style.cssText = 'display: block; margin: 2px 0; cursor: pointer;';
+      const checkbox = document.createElement('input');
+      checkbox.type = 'checkbox';
+      checkbox.checked = record.visible;
+      checkbox.addEventListener('change', () => {
+        record.visible = checkbox.checked;
+        this._applyRenderableVisibility(record);
+        this._refreshFullscreenPanel();
+      });
+      label.append(checkbox, document.createTextNode(` ${record.label}`));
+      container.appendChild(label);
+    });
+  }
+
+  // Groups renderables by `group` (one collapsible section + one select-all checkbox each, e.g.
+  // "Parcels"); within a group that contains more than one distinct `kind` (e.g. a per-block
+  // config's own "Created"/"Former Tenure" parcel rules sharing one "parcel" group), each kind
+  // gets its own labeled sub-list with its own select-all checkbox nested underneath. A group
+  // with only one kind (every built-in group, by default) renders exactly as it did before groups
+  // existed — the per-feature checkboxes sit directly under the group heading, no redundant
+  // single-item sub-heading.
   _refreshFullscreenPanel() {
     const panel = this._fullscreenPanelEl;
     if (!panel) return;
     panel.innerHTML = '';
 
-    const kinds = [...new Set(this._renderables.map(r => r.kind))];
-    kinds.forEach(kind => {
-      const records = this._renderables.filter(r => r.kind === kind);
-      const allVisible = records.every(r => r.visible);
-      const noneVisible = records.every(r => !r.visible);
+    const groups = [...new Set(this._renderables.map(r => r.group))];
+    groups.forEach(group => {
+      const groupRecords = this._renderables.filter(r => r.group === group);
+      const kinds = [...new Set(groupRecords.map(r => r.kind))];
 
       const details = document.createElement('details');
       details.open = true;
@@ -687,39 +811,38 @@ export default class TopoFeaturePlugin {
 
       const summary = document.createElement('summary');
       summary.style.cssText = 'cursor: pointer; display: flex; align-items: center; gap: 6px;';
-
-      const groupCheckbox = document.createElement('input');
-      groupCheckbox.type = 'checkbox';
-      groupCheckbox.checked = allVisible;
-      groupCheckbox.indeterminate = !allVisible && !noneVisible;
-      // Prevent the checkbox click from also toggling the <details> open/closed state.
-      groupCheckbox.addEventListener('click', e => e.stopPropagation());
-      groupCheckbox.addEventListener('change', () => {
-        records.forEach(r => { r.visible = groupCheckbox.checked; this._applyRenderableVisibility(r); });
-        this._refreshFullscreenPanel();
-      });
-
-      summary.append(groupCheckbox, document.createTextNode(`${KIND_PANEL_LABELS[kind] || kind} (${records.length})`));
+      const groupLabel = GROUP_PRESENTATION[group]?.panelLabel || humanizeSlug(group);
+      summary.append(this._buildSelectAllCheckbox(groupRecords), document.createTextNode(`${groupLabel} (${groupRecords.length})`));
       details.appendChild(summary);
 
-      const list = document.createElement('div');
-      list.style.cssText = 'padding-left: 20px; margin-top: 4px;';
-      records.forEach(record => {
-        const label = document.createElement('label');
-        label.style.cssText = 'display: block; margin: 2px 0; cursor: pointer;';
-        const checkbox = document.createElement('input');
-        checkbox.type = 'checkbox';
-        checkbox.checked = record.visible;
-        checkbox.addEventListener('change', () => {
-          record.visible = checkbox.checked;
-          this._applyRenderableVisibility(record);
-          this._refreshFullscreenPanel();
-        });
-        label.append(checkbox, document.createTextNode(` ${record.label}`));
-        list.appendChild(label);
-      });
-      details.appendChild(list);
+      const body = document.createElement('div');
+      body.style.cssText = 'padding-left: 20px; margin-top: 4px;';
 
+      if (kinds.length > 1) {
+        kinds.forEach(kind => {
+          const kindRecords = groupRecords.filter(r => r.kind === kind);
+          const kindLabel = kindRecords[0].kindLabel || GROUP_PRESENTATION[kind]?.panelLabel || humanizeSlug(kind);
+
+          const kindWrapper = document.createElement('div');
+          kindWrapper.style.cssText = 'margin-bottom: 6px;';
+
+          const kindHeader = document.createElement('label');
+          kindHeader.style.cssText = 'display: flex; align-items: center; gap: 6px; font-weight: 600; cursor: pointer;';
+          kindHeader.append(this._buildSelectAllCheckbox(kindRecords), document.createTextNode(`${kindLabel} (${kindRecords.length})`));
+          kindWrapper.appendChild(kindHeader);
+
+          const kindList = document.createElement('div');
+          kindList.style.cssText = 'padding-left: 20px; margin-top: 2px;';
+          this._appendFeatureCheckboxes(kindList, kindRecords);
+          kindWrapper.appendChild(kindList);
+
+          body.appendChild(kindWrapper);
+        });
+      } else {
+        this._appendFeatureCheckboxes(body, groupRecords);
+      }
+
+      details.appendChild(body);
       panel.appendChild(details);
     });
   }
@@ -758,6 +881,7 @@ export default class TopoFeaturePlugin {
     this._solidEdges = [];
     this._solidVertices = [];
     this._renderables = [];
+    this._config = null;
     this._kindToggleButtons = [];
     this._fullscreenPanelEl = null;
     this._perspectiveCamera = null;

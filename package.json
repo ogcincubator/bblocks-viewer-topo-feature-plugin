@@ -9,7 +9,8 @@
   "scripts": {
     "prebuild": "node scripts/check-three-version.mjs",
     "build": "vite build",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "node --test src/utils/*.test.js"
   },
   "dependencies": {
     "earcut": "^3.0.2"
