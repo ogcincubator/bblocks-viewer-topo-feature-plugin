@@ -13,7 +13,7 @@
   "purpose": "wa-survey-purpose:subdivision",
   "surveyType": "wa-survey-type:deposited-plan",
   "time": {
-    "date": "2026-01-02T00:00:00Z"
+    "date": "2026-01-02"
   },
   "horizontalCRS": "epsg:8031",
   "verticalCRS": "epsg:5711",
